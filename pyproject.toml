@@ -1,0 +1,16 @@
+[project]
+name = "mlops-labs"
+version = "0.1.0"
+description = "MLOps course project: Truth Social posts and S&P 500 reaction"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.0",
+    "ruff>=0.8",
+]
+
+[tool.ruff]
+line-length = 100
