@@ -1,0 +1,4 @@
+FROM ghcr.io/mlflow/mlflow:v3.16.1
+
+# PostgreSQL driver for the backend store, boto3 for the S3 (MinIO) artifact store
+RUN pip install --no-cache-dir psycopg2-binary boto3

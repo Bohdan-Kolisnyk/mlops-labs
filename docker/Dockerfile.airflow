@@ -1,0 +1,4 @@
+FROM apache/airflow:3.3.1
+
+# Libraries the ETL tasks import. The project package itself is mounted from ./src.
+RUN pip install --no-cache-dir pandas pyarrow sqlalchemy tzdata
