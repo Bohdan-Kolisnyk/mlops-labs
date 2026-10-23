@@ -1,19 +1,37 @@
 [project]
 name = "mlops-labs"
-version = "0.1.0"
+version = "0.2.0"
 description = "MLOps course project: Truth Social posts and S&P 500 reaction"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "dvc==3.67.1",
     "dvc-s3==3.3.0",
+    "pandas>=2.2",
+    "pyarrow>=17",
+    "numpy>=1.26",
+    "sqlalchemy>=2.0",
+    "psycopg2-binary>=2.9",
+    "tzdata",
 ]
 
 [dependency-groups]
 dev = [
     "pre-commit>=4.0",
     "ruff>=0.8",
+    "pytest>=8.0",
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mlops_labs"]
 
 [tool.ruff]
 line-length = 100
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]

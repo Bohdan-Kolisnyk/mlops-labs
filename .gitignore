@@ -221,3 +221,6 @@ __marimo__/
 
 data/processed/
 logs/
+
+data/staging/
+data/raw_bad/
