@@ -203,7 +203,7 @@ The local stack follows the course reference stack with its pinned versions. AWS
 | MinIO | pgsty/silo, S3-compatible | object storage: raw, clean and feature files, DVC remote, MLflow artifacts | Lab 2 | Amazon S3 |
 | DVC | DVC 3.67.1 with dvc-s3, remote on MinIO | data versioning of posts and price bars (version point) | Lab 2 | S3 remote |
 | PostgreSQL | PostgreSQL 16 (pgvector image) | MLflow and Airflow metadata, the warehouse (`raw_posts`, `clean_posts`, `features`), recent posts, prediction log; pgvector index from Lab 3 | Lab 2 | Amazon RDS for PostgreSQL |
-| Airflow | Apache Airflow 3.3.1, LocalExecutor | orchestrator: ingest, preprocess, train and monitoring DAGs | Lab 2 | Amazon MWAA |
+| Airflow | Apache Airflow 3.3.1, LocalExecutor | orchestrator: the monthly ETL DAG `truth_social_etl` in Lab 2; monitoring DAGs from Lab 4 (training is run by `make train`, not by Airflow) | Lab 2 | Amazon MWAA |
 | Feast | Feast 0.66.0 | feature store: in Lab 2 a parquet offline source and a SQLite online store, in its own `feature_repo/` environment because Feast pins pandas below 3 (MinIO and PostgreSQL for the two sides are planned for Lab 4) | Lab 2 | SageMaker Feature Store |
 | MLflow | MLflow 3.16.1, PostgreSQL backend, MinIO artifacts | experiment tracking and model registry (alias champion) | Lab 2 | SageMaker with MLflow |
 | LLM endpoint | vLLM or a hosted API | LLM baseline and retrieval-augmented answers | Lab 3 | Amazon Bedrock |
