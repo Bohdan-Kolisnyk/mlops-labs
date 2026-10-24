@@ -136,7 +136,7 @@ I used Claude as an assistant for Lab 1:
 4. Architecture planning
 
 For Lab 2:
-1. Plan the stages and 
+1. Plan the stages
 2. Write the first versions of the compose stack, the ETL code and DAG, the quality gate, the features, the training and reproduction scripts, the Feast repository, the tests, and the updates of README and of the design doc
 
 This part is written by me, by hand. Everything is reviewed, verified and approved by me.
