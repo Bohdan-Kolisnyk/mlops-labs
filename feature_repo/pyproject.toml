@@ -1,0 +1,9 @@
+[project]
+name = "feature-repo"
+version = "0.1.0"
+description = "Feast feature repository (own environment: feast pins pandas below 3)"
+requires-python = ">=3.12"
+dependencies = [
+    "feast==0.66.0",
+    "pyarrow>=17",
+]

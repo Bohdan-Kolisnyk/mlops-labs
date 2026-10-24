@@ -1,4 +1,4 @@
-.PHONY: setup lint test up down data etl-month months train reproduce
+.PHONY: setup lint test up down data etl-month months train reproduce features feast-demo
 
 setup:
 	uv sync
@@ -33,3 +33,10 @@ train:
 # rebuild the registered champion from its tags and compare the metrics
 reproduce:
 	uv run python scripts/reproduce.py models:/truth-social-abnormal-move@champion
+
+# Feast runs in its own environment (feature_repo/pyproject.toml): it pins pandas below 3
+features:
+	uv run python scripts/export_slot_sigma.py
+
+feast-demo: features
+	cd feature_repo && uv sync && uv run feast apply && uv run python demo.py

@@ -224,3 +224,5 @@ logs/
 
 data/staging/
 data/raw_bad/
+
+feature_repo/data/
