@@ -76,3 +76,9 @@ def test_context_model_and_candidate_fit_and_score_a_tiny_table():
         assert len(s) == n and np.isfinite(s).all()
     s = models.Candidate(c=1.0).fit(df).score(df)
     assert len(s) == n and ((0 <= s) & (s <= 1)).all()
+
+
+def test_the_vocabulary_is_cut_by_a_threshold_not_by_a_top_k():
+    # a top-k cut breaks ties with a platform-dependent sort, see build_candidate
+    tfidf = models.build_candidate().named_steps["prep"].transformers[0][1]
+    assert tfidf.max_features is None and tfidf.min_df == 5

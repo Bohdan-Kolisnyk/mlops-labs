@@ -116,12 +116,17 @@ CANDIDATE_INPUT = ["text", *FEATURE_COLUMNS]
 
 
 def build_candidate(c: float = 1.0, seed: int = 0) -> Pipeline:
-    """TF-IDF of the text plus the scaled context features into a logistic regression."""
+    """TF-IDF of the text plus the scaled context features into a logistic regression.
+
+    The vocabulary is cut by `min_df` only, never by `max_features`: with a top-k cut, many
+    terms tie at the boundary (here 231 terms with the same count) and which of them stay
+    depends on the sort implementation of the CPU, so two machines got different models.
+    """
     prep = ColumnTransformer(
         [
             (
                 "tfidf",
-                TfidfVectorizer(ngram_range=(1, 2), min_df=3, max_features=5000, sublinear_tf=True),
+                TfidfVectorizer(ngram_range=(1, 2), min_df=5, sublinear_tf=True),
                 "text",
             ),
             ("num", StandardScaler(), FEATURE_COLUMNS),
