@@ -6,7 +6,7 @@
 What it does:
   1. resolves the model version (or run) in the MLflow registry and reads its two lineage
      tags, `data_version` and `git_commit`;
-  2. checks that the code in this checkout is the code of that commit (src/, scripts/,
+  2. checks that the code in this checkout is the code of that commit (src/,
      pyproject.toml, uv.lock), and refuses with the git command to run if it is not;
   3. makes data/raw match the data version: `dvc pull`, and if data/raw.dvc names another
      version it is restored from the commit first (and put back afterwards);
@@ -33,6 +33,8 @@ from mlops_labs.train import CHECKED_METRICS, MODEL_NAME, run_training
 
 DEFAULT_TOLERANCE = 0.005
 DVC = [sys.executable, "-m", "dvc"]
+# what a training run imports; scripts/ and feature_repo/ do not change the model
+TRAINING_CODE = ["src", "pyproject.toml", "uv.lock"]
 
 
 def sh(*cmd: str, check: bool = True) -> str:
@@ -85,7 +87,7 @@ def main() -> int:
     # code: same files as at the commit
     if lineage.git_dirty():
         raise SystemExit("uncommitted changes in src/, scripts/, pyproject.toml or uv.lock")
-    differs = sh("git", "diff", "--name-only", commit, "HEAD", "--", *lineage.CODE_PATHS)
+    differs = sh("git", "diff", "--name-only", commit, "HEAD", "--", *TRAINING_CODE)
     if differs:
         raise SystemExit(
             f"the code differs from commit {commit[:10]} in:\n  {differs}\n"

@@ -24,7 +24,7 @@ The operating point is an alert rate: the top 20% of scored posts by `p_abnormal
 
 | Layer | Metric | Target |
 |---|---|---|
-| Business / decision | Coverage of big moves: share of abnormal-move posts that receive an alert at the 20% alert rate | At least 40%, twice random alerting (assumption; revised after the Lab 2 baselines) |
+| Business / decision | Coverage of big moves: share of abnormal-move posts that receive an alert at the 20% alert rate | At least 40%, twice random alerting (assumption; the Lab 2 results in 7.2 reach 0.16 to 0.29 on the hold-out, so the target is not met and is kept for Labs 3 and 4) |
 | Business / decision | Analyst load | One or two alerts per trading day on average, at most 20% of scored posts (assumption about one analyst's capacity) |
 | Model | PR-AUC on validation and hold-out (optimization metric; threshold-free) | Above the better of baselines B1 and B2 (section 5.3), by a margin shown with a bootstrap interval. No absolute target: since posts as a group show no excess of abnormal moves, failing to beat the baselines is a possible outcome and would be reported as such |
 | Model | Calibration of `p_abnormal` (satisficing) | Reliability curve and Brier score reported; no alert threshold is chosen from an uncalibrated score |
@@ -91,6 +91,8 @@ The window of `r` starts up to 60 minutes before the post and ends 60 to 120 min
 
 **Labels and delay.** The label is known at the close of bar c+1, which is one to two hours after the post.
 
+**Batch grain and data version (as built in Lab 2).** The batch is one calendar month of posts (`YYYY-MM`, taken from the Airflow data interval or from the `month` parameter, never from the clock); the smallest month in the archive has 52 usable posts. The raw directory `data/raw` (the posts parquet and the hourly bars CSV, 2 files, 14,893,864 bytes) is versioned with DVC; the data version identifier is its DVC hash, `d756bd56a53aee1182a62f609dab15bc.dir`, stored in `data/raw.dvc` and written into the `data_version` column of every cleaned row and into the tags of every MLflow run. The remote is the compose MinIO, bucket `dvc`. The labels, the cleaning flags and the features are computed on the whole archive and then cut to the month, so they depend on the data version and not on the order of the runs. The pipeline reproduces the numbers above (`tests/test_real_data.py`): 4,877 labelled posts on 621 days, 1,136 empty texts, 118 duplicates.
+
 **Training time versus serving time.**
 
 | Field | Training | Serving |
@@ -115,8 +117,8 @@ The window of `r` starts up to 60 minutes before the post and ends 60 to 120 min
 - **Mixed granularity in the dataset.** Its intraday prices are hourly for most rows but 5-minute, 1-minute or unflagged for recent ones (the source keeps fine bars only for days or weeks). Plan: resolved by source 2, which has one granularity (hourly bars starting at :30 ET) for the whole period. Bar completeness per day is monitored as a data-quality check.
 - **Limited retention of hourly bars.** The source provides hourly bars only for about the last two years, so bars older than that cannot be downloaded again. Plan: the downloaded file is the system's own record of prices; it is versioned with DVC and extended every month by the ingestion pipeline. This is also why the labelled history starts in December 2023.
 - **Coarse timing.** With hourly bars the label window starts up to 60 minutes before the post. Plan: accept it, state it in the label definition (section 5.1), and list reverse timing as a risk (6.9).
-- **Empty and duplicate texts.** 23.3% of in-window posts have no text (media or reposts) and 118 texts are duplicates. Plan: drop empty texts and deduplicate in preprocessing.
-- **Bursts.** About 84% of in-window posts share an hour with another post, so observations are not independent. Plan: time-based split and grouping by hour.
+- **Empty and duplicate texts.** 23.3% of in-window posts have no text (media or reposts) and 118 texts are duplicates. Plan: drop empty texts and deduplicate in preprocessing. As built: the `transform` task keeps every labelled row in `clean_posts` and flags it (`text_empty`, `dup_text`); only the rows with neither flag reach the `features` table (3,623 of 4,877).
+- **Bursts.** About 86% of in-window posts share an hour with another post (measured in Lab 2; the first draft said 84%), so observations are not independent. Plan: time-based split and grouping by hour.
 - **Dataset flag for market hours.** `during_market_hours` uses 09:30–16:00 ET, which is wider than our window, and it is missing for posts after 2026-03-23. Plan: derive the window ourselves from the UTC timestamp (America/New_York) and the trading days in source 2.
 
 ### 5.3 Techniques
@@ -128,6 +130,8 @@ The window of `r` starts up to 60 minutes before the post and ends 60 to 120 min
 3. **B2: context-only model.** A simple model on the time slot, σ and the return of the last completed bar, with no text. It shows whether the text adds anything at all.
 
 **Candidate.** Text features (TF-IDF or sentence embeddings) plus the context features below, with logistic regression or a gradient-boosted model. Lab 3 adds a zero-shot LLM baseline for comparison.
+
+**As built in Lab 2.** B1 counts hits of 30 fixed market terms (the list is fixed before looking at labels and its hash is logged). B2 is a logistic regression on the one-hot time slot, σ, the last bar return and its absolute value. The candidate is TF-IDF of the text (word 1 to 2-grams, `min_df=5`, 4,263 terms on the training period) plus the ten scaled numeric features of the table below, into a logistic regression with C=1. The vocabulary is cut by `min_df` only: a first version with `max_features=5000` tied on 231 terms with the same count at the boundary, and the sort that broke the ties differs between machines, so Linux and Windows trained different models (validation PR-AUC 0.162 against 0.173). Dropping the top-k cut fixed it, and a test guards it. The feature table has a `feature_version` column (`v1`).
 
 **Features and their serving-time source.**
 
@@ -154,7 +158,7 @@ The window of `r` starts up to 60 minutes before the post and ends 60 to 120 min
 | Validation | 2025-07-01 to 2025-12-31 | 613 | 98 (16.0%) |
 | Test (hold-out) | 2026-01-05 to 2026-10-16 | 1,208 | 164 (13.6%) |
 
-These are prototype counts; Lab 2 recomputes them in the pipeline. Split boundaries fall between calendar half-years, so posts of the same hour never straddle a boundary. Inside the training period, use expanding-window cross-validation by month. The validation set has 98 positive examples, so confidence intervals are wide; results are reported with a bootstrap by hour.
+These are prototype counts for all labelled posts; the Lab 2 pipeline reproduces them exactly. After the cleaning rules (empty and duplicate texts are dropped) the training table has 2,266 train, 437 validation and 920 test rows with 323 (14.3%), 49 (11.2%) and 130 (14.1%) abnormal moves, and all baselines and the candidate are evaluated on these rows. Intervals are bootstrap resamples by hour (1,000 draws, seed 0). The alert threshold is set on validation and kept fixed on test; posts whose scores tie (every post for B0, most posts for B1) are ranked by a seeded random tie-break, so every model alerts on exactly 20% of validation posts. Expanding-window cross-validation by month on the training period is logged as `cv_pr_auc_mean`. Split boundaries fall between calendar half-years, so posts of the same hour never straddle a boundary. Inside the training period, use expanding-window cross-validation by month. The validation set has 98 positive examples, so confidence intervals are wide; results are reported with a bootstrap by hour.
 
 **Alert threshold.** Set on the validation period so that 20% of posts are flagged, then kept fixed on the hold-out. The alert rate on new data is monitored (section 4.2).
 
@@ -184,6 +188,8 @@ The three diagrams below use the same component names as section 6.2.
 
 ![Data flow](diagrams/data-flow.svg)
 
+In Lab 2 the layers are these Airflow tasks of the DAG `truth_social_etl`: `extract`, `validate`, `transform`, `quality_check`, `load` (raw and cleaned rows into the PostgreSQL warehouse, delete-then-insert per month) and `build_features`. The quality gate runs before `load`, so a bad month never reaches the warehouse.
+
 **Deployment, first draft.** Every component carries the lab in which it first runs; Lab 4 replaces this diagram with the real cluster topology.
 
 ![Deployment](diagrams/deployment.svg)
@@ -196,9 +202,9 @@ The local stack follows the course reference stack with its pinned versions. AWS
 |---|---|---|---|---|
 | MinIO | pgsty/silo, S3-compatible | object storage: raw, clean and feature files, DVC remote, MLflow artifacts | Lab 2 | Amazon S3 |
 | DVC | DVC 3.67.1 with dvc-s3, remote on MinIO | data versioning of posts and price bars (version point) | Lab 2 | S3 remote |
-| PostgreSQL | PostgreSQL 16 (pgvector image) | MLflow and Airflow metadata, Feast online store, recent posts, prediction log; pgvector index from Lab 3 | Lab 2 | Amazon RDS for PostgreSQL |
+| PostgreSQL | PostgreSQL 16 (pgvector image) | MLflow and Airflow metadata, the warehouse (`raw_posts`, `clean_posts`, `features`), recent posts, prediction log; pgvector index from Lab 3 | Lab 2 | Amazon RDS for PostgreSQL |
 | Airflow | Apache Airflow 3.3.1, LocalExecutor | orchestrator: ingest, preprocess, train and monitoring DAGs | Lab 2 | Amazon MWAA |
-| Feast | Feast 0.66.0 | feature store: offline side on MinIO, online side on PostgreSQL (optional extra point in Lab 2) | Lab 2 | SageMaker Feature Store |
+| Feast | Feast 0.66.0 | feature store: in Lab 2 a parquet offline source and a SQLite online store, in its own `feature_repo/` environment because Feast pins pandas below 3 (MinIO and PostgreSQL for the two sides are planned for Lab 4) | Lab 2 | SageMaker Feature Store |
 | MLflow | MLflow 3.16.1, PostgreSQL backend, MinIO artifacts | experiment tracking and model registry (alias champion) | Lab 2 | SageMaker with MLflow |
 | LLM endpoint | vLLM or a hosted API | LLM baseline and retrieval-augmented answers | Lab 3 | Amazon Bedrock |
 | Model service | container image on Minikube | online scoring API, one post per request | Lab 4 | Amazon EKS with ECR |
@@ -230,8 +236,8 @@ The cluster itself is Minikube 1.33.1 (Kubernetes 1.30.0, docker driver, 4 GB); 
 
 ### 6.4 Security
 
-- **Secrets.** MinIO keys, the PostgreSQL password, the chat webhook URL and any LLM API key live in a local `.env` file that git ignores, and in Kubernetes Secrets on Minikube from Lab 4. Nothing secret is committed; the Lab 1 CI needs no secrets. AWS equivalent: AWS Secrets Manager.
-- **Who may call the service.** The model service is reachable only inside the cluster or through a local port-forward. Its callers are the post replayer and, from Lab 5, the agent. Airflow, MLflow and Grafana web interfaces listen on localhost only and require a password.
+- **Secrets.** MinIO keys, the PostgreSQL password, the chat webhook URL and any LLM API key live in a local `.env` file that git ignores, and in Kubernetes Secrets on Minikube from Lab 4. The DVC remote credentials are kept in `.dvc/config.local`, which git ignores, and only the remote URL is committed. Nothing secret is committed; the Lab 1 CI needs no secrets. AWS equivalent: AWS Secrets Manager.
+- **Who may call the service.** The model service is reachable only inside the cluster or through a local port-forward. Its callers are the post replayer and, from Lab 5, the agent. Airflow, MLflow, MinIO and Grafana web interfaces listen on localhost only. In Lab 2 Airflow runs with its all-admins simple auth manager and MLflow without authentication (assumption: a single-user local stack); passwords are added in Lab 4 when the interfaces are deployed.
 - **Supply chain.** The Python environment is pinned by `uv.lock`, and container images use the pinned versions of the reference stack.
 
 ### 6.5 Data privacy
@@ -249,11 +255,13 @@ The cluster itself is Minikube 1.33.1 (Kubernetes 1.30.0, docker driver, 4 GB); 
 |---|---|---|---|
 | Service health | error rate, p95 latency (Prometheus) | error rate above 1% or p95 above 500 ms for 10 minutes | system owner |
 | Data freshness | age of the newest bar and of the newest post in the store | newest bar older than one trading hour during the session; newest post older than 2 days | system owner |
-| Data quality | quality gate: schema, bars per full trading day, timestamps, share of empty texts | any check fails (the run stops); share of empty texts above 40% (23% in the archive) | system owner |
+| Data quality | quality gate: schema, bars per full trading day, timestamps, share of empty texts | any check fails (the run stops); share of empty texts in a monthly batch above 60% (measured on the archive: 7% to 45% by month, 23% overall; the first draft said 40%, which would have stopped two normal months, December 2025 and October 2026) | system owner |
 | Input drift | Evidently drift score per feature (text length, time slot, σ, keyword share) against the training period | PSI above 0.2 on any monitored feature | system owner |
 | Prediction drift | alert rate over the last 5 trading days | outside 10% to 30% (target 20%) | system owner |
 | Model performance | rolling PR-AUC over the last 20 trading days, after the label join | below the validation PR-AUC of baseline B2 | system owner; starts the retraining DAG (stretch goal of Lab 4) |
 | Alerts for the analyst | `p_abnormal` above the threshold of section 5.4 | top 20% of posts | analyst |
+
+As built in Lab 2, the gate runs nine checks between `transform` and `load`: schema, row count of at least 10, no nulls in key columns, unique `post_id`, timestamps inside the batch interval, post time slot inside the window, share of empty texts, label rate between 0% and 50%, and bars per trading day (7 or 3).
 
 The data freshness alert watches the data itself, not the job status, so a pipeline that succeeds while reading the same stale partition is still caught. Lab 4 turns this table into Evidently reports, Prometheus rules and Grafana dashboards.
 
@@ -289,6 +297,8 @@ Two always-on managed services, MWAA and the MLflow tracking server, make up abo
 | Analyst (downstream) | the analyst | An alert with `post_id`, post link, time, `p_abnormal` and `model_version`, at most 60 s after the post arrives (assumption), for about 20% of in-window posts. The full response is the JSON of section 4.1. |
 | Agent (downstream, Lab 5) | the project | The same `/score` endpoint and response, plus a retrieval tool over the post archive; the endpoint is versioned (`v1`) so that the agent does not break when the model changes. |
 
+**Contract checks as built.** The `validate` task raises a schema error when a contract column is missing or has a wrong type, and when a batch is empty or has duplicate `post_id`. The remaining checks are in the quality gate (6.6).
+
 ### 6.9 Risks and uncertainties
 
 | Risk | Mitigation |
@@ -320,7 +330,20 @@ Two always-on managed services, MWAA and the MLflow tracking server, make up abo
 
 ### 7.2 Experiment results
 
-Placeholder: filled in Lab 2.
+All runs are in the MLflow experiment `truth-social-abnormal-moves` (screenshots: `docs/screenshots/mlflow_runs.png`). Data version `d756bd56a53aee1182a62f609dab15bc.dir`, code commit `3ed0ad1d913c45b974fd5b27ced9e54fafd78ae6`. Time split of 5.4; 20% alert rate; the threshold is set on validation.
+
+| Model | PR-AUC validation | PR-AUC test | Coverage at 20% alerts, test | Precision at 20% alerts, test |
+|---|---|---|---|---|
+| B0 constant prior | 0.112 | 0.141 | 0.146 | 0.119 |
+| B1 keyword rule | 0.147 | 0.153 | 0.285 | 0.140 |
+| B2 context only | 0.208 | 0.185 | 0.162 | 0.153 |
+| Candidate, TF-IDF and context, logistic regression | 0.172 | 0.182 | 0.223 | 0.210 |
+
+Base rate of abnormal moves: 11.2% on validation, 14.1% on test. Candidate minus B2 (PR-AUC): validation -0.036, 95% interval [-0.231, +0.058]; test -0.003, interval [-0.101, +0.078].
+
+**Reading.** No model reaches the 40% coverage target of section 3; random alerting catches about 20% and the test set has only 130 abnormal posts, so coverage differences of a few points are noise (B0 shows 0.146 with no information at all). The candidate does not beat the better baseline: the intervals contain zero and the point estimates are below B2, so the promotion rule of 5.4 is not met. The text adds nothing measurable over the time slot, σ and the last bar, which is consistent with the finding of section 3 that posts as a group are not followed by more abnormal moves than an average window. The registry tag `beats_best_baseline_on_val=false` records this. The alias `champion` points at version 2 of the candidate only because Lab 4 needs a model to load by alias, not as a claim of quality; the B1 rule remains the fallback of the service (4.2).
+
+**Lineage.** Registered model `truth-social-abnormal-move`, version 2 (alias `champion`) carries the tags `data_version` and `git_commit` shown in `docs/screenshots/mlflow_version2.png`. `scripts/reproduce.py` rebuilds it from those two tags and reproduces validation and test PR-AUC with a difference of 0.00000 (tolerance 0.005, see the README).
 
 ### 7.3 Performance benchmarks
 
