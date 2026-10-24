@@ -1,6 +1,6 @@
 [project]
 name = "mlops-labs"
-version = "0.2.0"
+version = "0.3.0"
 description = "MLOps course project: Truth Social posts and S&P 500 reaction"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -13,6 +13,9 @@ dependencies = [
     "sqlalchemy>=2.0",
     "psycopg2-binary>=2.9",
     "tzdata",
+    "scikit-learn>=1.5",
+    "mlflow-skinny==3.16.1",  # client; the server is the pinned mlflow image in compose
+    "skops>=0.11",  # default model serialization of the MLflow sklearn flavor
 ]
 
 [dependency-groups]
@@ -20,6 +23,7 @@ dev = [
     "pre-commit>=4.0",
     "ruff>=0.8",
     "pytest>=8.0",
+    "alembic>=1.13",  # lets the tests use a SQLite MLflow backend
 ]
 
 [build-system]
