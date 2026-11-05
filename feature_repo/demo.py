@@ -1,7 +1,7 @@
 """Point-in-time retrieval demo (Lab 2, step 4). Run after `feast apply`:
 
 cd feature_repo
-uv run feast apply
+uv run python apply.py
 uv run python demo.py
 """
 
@@ -12,12 +12,14 @@ from pathlib import Path
 
 import pandas as pd
 from feast import FeatureStore
+from feast_env import setup_env
 
 HERE = Path(__file__).resolve().parent
 FEATURE = "slot_sigma:sigma"
 
 
 def main() -> None:
+    setup_env()
     store = FeatureStore(repo_path=str(HERE))
     rows = pd.read_parquet(HERE / "data" / "slot_sigma.parquet")
 

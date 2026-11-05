@@ -4,11 +4,18 @@ Batch = one calendar month of posts, taken from the DAG run's data interval or f
 `month` parameter, never from the wall clock.
 
 extract -> validate -> transform -> quality_check -> load -> build_features
+
+The tasks hand data to each other through the warehouse, never through the orchestrator:
+`extract` and `transform` write the scratch tables `stg_posts` and `stg_clean` (one batch at
+a time, replaced on every run), `quality_check` reads `stg_clean`, and only `load` copies
+the batch into `raw_posts` and `clean_posts`. A task returns just a few counters (metadata).
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import subprocess
 from pathlib import Path
 
 import pandas as pd
@@ -26,7 +33,7 @@ from mlops_labs.data import (
 from mlops_labs.features import compute_features
 from mlops_labs.labels import build_windows, label_posts
 from mlops_labs.quality import assert_quality
-from mlops_labs.warehouse import count_batch, replace_batch
+from mlops_labs.warehouse import TABLES, count_batch, replace_batch
 
 log = logging.getLogger(__name__)
 
@@ -54,26 +61,48 @@ def batch_bounds(
     return start, end, start.strftime("%Y-%m")
 
 
-def _stage(staging_dir: str | Path, batch: str) -> Path:
-    d = Path(staging_dir) / batch
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+STAGE_POSTS = "stg_posts"
+STAGE_CLEAN = "stg_clean"
 
 
-def extract(raw_dir: str | Path, staging_dir: str | Path, start, end, batch: str) -> dict:
-    """Read the posts of the batch from the raw directory into the staging area."""
+def _stage_write(engine: Engine, table: str, df: pd.DataFrame, batch: str) -> None:
+    """Replace the batch in a scratch table (same delete-then-insert as the final tables)."""
+    df = df.copy()
+    df["batch"] = batch
+    with engine.begin() as conn:
+        replace_batch(conn, table, df, batch)
+
+
+def read_batch(engine: Engine, table: str, batch: str) -> pd.DataFrame:
+    """The rows of one batch from a warehouse table, with proper types."""
+    if table not in TABLES:
+        raise ValueError(f"unknown table {table!r}")
+    df = pd.read_sql(text(f"SELECT * FROM {table} WHERE batch = :b"), engine, params={"b": batch})
+    for col in ("created_at", "bar_start"):
+        if col in df:
+            df[col] = pd.to_datetime(df[col], utc=True)
+    if "session_date" in df:
+        df["session_date"] = pd.to_datetime(df["session_date"])
+    for col in ("text_empty", "dup_text", "has_media"):
+        if col in df:
+            df[col] = df[col].astype(bool)
+    return df
+
+
+def extract(raw_dir: str | Path, engine: Engine, start, end, batch: str) -> dict:
+    """Read the posts of the batch from the raw directory into the scratch table stg_posts."""
     posts = load_posts(Path(raw_dir) / config.POSTS_FILE)
     t = posts["created_at"]
     rows = posts[(t >= start) & (t < end)]
-    rows.to_parquet(_stage(staging_dir, batch) / "posts_batch.parquet", index=False)
+    _stage_write(engine, STAGE_POSTS, rows, batch)
     log.info("extract %s: %d of %d posts", batch, len(rows), len(posts))
     return {"batch": batch, "posts_in_batch": len(rows), "posts_total": len(posts)}
 
 
-def validate(raw_dir: str | Path, staging_dir: str | Path, batch: str) -> dict:
+def validate(raw_dir: str | Path, engine: Engine, batch: str) -> dict:
     """Schema and basic sanity checks on the raw batch, before any transformation."""
     check_posts_schema(Path(raw_dir) / config.POSTS_FILE)
-    rows = pd.read_parquet(_stage(staging_dir, batch) / "posts_batch.parquet")
+    rows = read_batch(engine, STAGE_POSTS, batch)
     if rows.empty:
         raise SchemaError(f"batch {batch} has no posts")
     problems = []
@@ -86,7 +115,7 @@ def validate(raw_dir: str | Path, staging_dir: str | Path, batch: str) -> dict:
     return {"batch": batch, "rows": len(rows)}
 
 
-def transform(raw_dir: str | Path, staging_dir: str | Path, start, end, batch: str) -> dict:
+def transform(raw_dir: str | Path, engine: Engine, start, end, batch: str) -> dict:
     """Label the posts, flag empty and duplicate texts, keep the posts of the batch.
 
     The labels and the duplicate flags are computed on the whole archive and then cut to
@@ -119,7 +148,7 @@ def transform(raw_dir: str | Path, staging_dir: str | Path, start, end, batch: s
             "batch",
         ]
     ]
-    clean.to_parquet(_stage(staging_dir, batch) / "clean_batch.parquet", index=False)
+    _stage_write(engine, STAGE_CLEAN, clean, batch)
     stats = {
         "batch": batch,
         "clean_rows": len(clean),
@@ -130,12 +159,10 @@ def transform(raw_dir: str | Path, staging_dir: str | Path, start, end, batch: s
     return stats
 
 
-def load(engine: Engine, staging_dir: str | Path, batch: str) -> dict:
+def load(engine: Engine, batch: str) -> dict:
     """Replace the batch in raw_posts and clean_posts, in one transaction."""
-    stage = _stage(staging_dir, batch)
-    raw = pd.read_parquet(stage / "posts_batch.parquet")
-    raw["batch"] = batch
-    clean = pd.read_parquet(stage / "clean_batch.parquet")
+    raw = read_batch(engine, STAGE_POSTS, batch)
+    clean = read_batch(engine, STAGE_CLEAN, batch)
     with engine.begin() as conn:
         replace_batch(conn, "raw_posts", raw, batch)
         replace_batch(conn, "clean_posts", clean, batch)
@@ -150,24 +177,15 @@ def load(engine: Engine, staging_dir: str | Path, batch: str) -> dict:
 
 def read_clean_batch(engine: Engine, batch: str) -> pd.DataFrame:
     """The loaded clean rows of one batch, with proper types."""
-    query = text("SELECT * FROM clean_posts WHERE batch = :b")
-    df = pd.read_sql(query, engine, params={"b": batch})
-    for col in ("created_at", "bar_start"):
-        df[col] = pd.to_datetime(df[col], utc=True)
-    df["session_date"] = pd.to_datetime(df["session_date"])
-    for col in ("text_empty", "dup_text", "has_media"):
-        df[col] = df[col].astype(bool)
-    return df
+    return read_batch(engine, "clean_posts", batch)
 
 
-def quality_check(
-    raw_dir: str | Path, staging_dir: str | Path, start, end, batch: str
-) -> dict:
+def quality_check(raw_dir: str | Path, engine: Engine, start, end, batch: str) -> dict:
     """The quality gate, between transform and load: a bad batch never reaches the warehouse.
 
     Raises QualityGateError when any check fails.
     """
-    clean = pd.read_parquet(_stage(staging_dir, batch) / "clean_batch.parquet")
+    clean = read_batch(engine, STAGE_CLEAN, batch)
     bars = load_bars(Path(raw_dir) / config.BARS_FILE)
     results = assert_quality(clean, bars, start, end)
     for r in results:
@@ -189,3 +207,27 @@ def build_features(engine: Engine, raw_dir: str | Path, batch: str) -> dict:
         n = count_batch(conn, "features", batch)
     log.info("build_features %s: %d rows, feature_version=%s", batch, n, config.FEATURE_VERSION)
     return {"batch": batch, "feature_rows": n, "feature_version": config.FEATURE_VERSION}
+
+
+def materialize_online(feast_python: str | Path, feature_repo: str | Path) -> dict:
+    """Publish the newest sigma of each slot to the Feast online store (PostgreSQL).
+
+    Feast has its own virtualenv (it pins pandas below 3), so the work is done by
+    feature_repo/materialize.py run with that interpreter. It prints one JSON line and fails
+    when a slot has no value online; that line is what the task returns.
+    """
+    feature_repo = Path(feature_repo)
+    done = subprocess.run(
+        [str(feast_python), str(feature_repo / "materialize.py")],
+        cwd=feature_repo,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    lines = [ln for ln in done.stdout.splitlines() if ln.startswith("{")]
+    if done.returncode != 0 or not lines:
+        raise RuntimeError(f"Feast materialize failed:\n{done.stdout}\n{done.stderr}")
+    result = json.loads(lines[-1])
+    log.info("materialize: %s", result)
+    return result

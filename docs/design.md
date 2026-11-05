@@ -188,7 +188,11 @@ The three diagrams below use the same component names as section 6.2.
 
 ![Data flow](diagrams/data-flow.svg)
 
-In Lab 2 the layers are these Airflow tasks of the DAG `truth_social_etl`: `extract`, `validate`, `transform`, `quality_check`, `load` (raw and cleaned rows into the PostgreSQL warehouse, delete-then-insert per month) and `build_features`. The quality gate runs before `load`, so a bad month never reaches the warehouse.
+In Lab 2 the layers are these Airflow tasks of the DAG `truth_social_etl`, chained with `>>`: `extract`, `validate`, `transform`, `quality_check`, `load` (raw and cleaned rows into the PostgreSQL warehouse, delete-then-insert per month), `build_features` and `materialize` (the newest σ of every time slot from the Feast offline store to the online store). The quality gate runs before `load`, so a bad month never reaches the warehouse.
+
+**What the tasks pass to each other.** Only metadata. A task gets its batch from the run context, reads its input from the warehouse (the scratch tables `stg_posts` after `extract` and `stg_clean` after `transform`) or from the raw files, writes its output there and returns a few counters as its XCom (batch, row counts, check results). Nothing is passed as a task argument or return value between tasks, and no data is kept on the local disk of an Airflow container. `load` copies the scratch tables of the batch into `raw_posts` and `clean_posts` in one transaction.
+
+**Serving path.** `scripts/predict.py` takes the text and the time of a post and scores it with the registered champion: the post is placed in its hourly bar and time slot, σ of the slot is read from Feast (point in time from the offline store by default, `--online` for the newest value from the online store), the other features are built by the same function as in training (`compute_features`), the model is loaded from the registry by the alias `champion`, and the probability is compared with the alert threshold (the top 20% of the validation scores). `scripts/predict.py --check N` scores N test posts from text and time only and shows that the result equals the training table (maximum difference 0).
 
 **Deployment, first draft.** Every component carries the lab in which it first runs; Lab 4 replaces this diagram with the real cluster topology.
 
@@ -202,9 +206,9 @@ The local stack follows the course reference stack with its pinned versions. AWS
 |---|---|---|---|---|
 | MinIO | pgsty/silo, S3-compatible | object storage: raw, clean and feature files, DVC remote, MLflow artifacts | Lab 2 | Amazon S3 |
 | DVC | DVC 3.67.1 with dvc-s3, remote on MinIO | data versioning of posts and price bars (version point) | Lab 2 | S3 remote |
-| PostgreSQL | PostgreSQL 16 (pgvector image) | MLflow and Airflow metadata, the warehouse (`raw_posts`, `clean_posts`, `features`), recent posts, prediction log; pgvector index from Lab 3 | Lab 2 | Amazon RDS for PostgreSQL |
+| PostgreSQL | PostgreSQL 16 (pgvector image) | MLflow and Airflow metadata, the warehouse (`raw_posts`, `clean_posts`, `features` and the scratch tables `stg_posts`, `stg_clean` between ETL tasks), the Feast registry and online store (database `feast`), recent posts, prediction log; pgvector index from Lab 3 | Lab 2 | Amazon RDS for PostgreSQL |
 | Airflow | Apache Airflow 3.3.1, LocalExecutor | orchestrator: the monthly ETL DAG `truth_social_etl` in Lab 2; monitoring DAGs from Lab 4 (training is run by `make train`, not by Airflow) | Lab 2 | Amazon MWAA |
-| Feast | Feast 0.66.0 | feature store: in Lab 2 a parquet offline source and a SQLite online store, in its own `feature_repo/` environment because Feast pins pandas below 3 (MinIO and PostgreSQL for the two sides are planned for Lab 4) | Lab 2 | SageMaker Feature Store |
+| Feast | Feast 0.66.0 | feature store, in its own `feature_repo/` environment because Feast pins pandas below 3: the offline source is a parquet file in MinIO (`s3://lake/feast/slot_sigma.parquet`), the registry and the online store are PostgreSQL (database `feast`); the last task of the DAG materializes the online store | Lab 2 | SageMaker Feature Store |
 | MLflow | MLflow 3.16.1, PostgreSQL backend, MinIO artifacts | experiment tracking and model registry (alias champion) | Lab 2 | SageMaker with MLflow |
 | LLM endpoint | vLLM or a hosted API | LLM baseline and retrieval-augmented answers | Lab 3 | Amazon Bedrock |
 | Model service | container image on Minikube | online scoring API, one post per request | Lab 4 | Amazon EKS with ECR |
@@ -351,7 +355,7 @@ Placeholder: filled in Lab 4.
 
 ### 7.4 Milestones
 
-- **Lab 2:** monthly Airflow ingestion of posts and hourly bars with data intervals, DVC on MinIO, the quality gate, labels, baselines B0 to B2 and the candidate tracked in MLflow with a `champion` alias, and Feast for the offline and online features.
+- **Lab 2:** monthly Airflow ingestion of posts and hourly bars with data intervals, DVC on MinIO, the quality gate, labels, baselines B0 to B2 and the candidate tracked in MLflow with a `champion` alias, Feast for the offline (MinIO) and online (PostgreSQL) features, and the serving path from the text and time of a post to a score (`scripts/predict.py`).
 - **Lab 3:** a zero-shot LLM baseline for the same label and retrieval over the post archive with each post's measured reaction (pgvector), evaluated on at least 30 questions and logged in MLflow.
 - **Lab 4:** the model service on Minikube fed by the post replayer, Evidently, Prometheus and Grafana monitoring, and an injected drift that reaches the system owner through the alert channel.
 - **Lab 5:** an agent with a retrieval tool (similar past posts and their reactions) and a prediction tool (the `/score` endpoint), traced and evaluated on ten tasks.

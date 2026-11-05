@@ -33,8 +33,16 @@ from mlops_labs.train import CHECKED_METRICS, MODEL_NAME, run_training
 
 DEFAULT_TOLERANCE = 0.005
 DVC = [sys.executable, "-m", "dvc"]
-# what a training run imports; scripts/ and feature_repo/ do not change the model
-TRAINING_CODE = ["src", "pyproject.toml", "uv.lock"]
+# what a training run imports; scripts/ and feature_repo/ do not change the model, and neither
+# do the ETL (pipeline, warehouse) and prediction modules, which training never imports
+TRAINING_CODE = [
+    "src",
+    "pyproject.toml",
+    "uv.lock",
+    ":(exclude)src/mlops_labs/pipeline.py",
+    ":(exclude)src/mlops_labs/warehouse.py",
+    ":(exclude)src/mlops_labs/predict.py",
+]
 
 
 def sh(*cmd: str, check: bool = True) -> str:

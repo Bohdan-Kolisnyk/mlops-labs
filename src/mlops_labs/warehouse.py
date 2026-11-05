@@ -8,7 +8,8 @@ import pandas as pd
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Connection, Engine
 
-TABLES = {"raw_posts", "clean_posts", "features"}
+# stg_* are the scratch tables the DAG tasks hand over to each other (see pipeline.py)
+TABLES = {"raw_posts", "clean_posts", "features", "stg_posts", "stg_clean"}
 
 
 def get_engine(url: str | None = None) -> Engine:

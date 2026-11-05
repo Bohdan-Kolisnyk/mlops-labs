@@ -19,7 +19,7 @@ slot = Entity(
 
 slot_sigma_source = FileSource(
     name="slot_sigma_source",
-    path="data/slot_sigma.parquet",
+    path="s3://lake/feast/slot_sigma.parquet",  # MinIO, written by scripts/export_slot_sigma.py
     timestamp_field="event_timestamp",
 )
 

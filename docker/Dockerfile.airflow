@@ -2,3 +2,8 @@ FROM apache/airflow:3.3.1
 
 # Libraries the ETL tasks import. The project package itself is mounted from ./src.
 RUN pip install --no-cache-dir pandas pyarrow sqlalchemy psycopg2-binary tzdata
+
+# Feast pins pandas below 3 and brings its own dependency tree, so it lives in a separate
+# virtualenv; the `materialize` task runs feature_repo/materialize.py with it.
+RUN python -m venv /home/airflow/feast-venv \
+    && /home/airflow/feast-venv/bin/pip install --no-cache-dir "feast[postgres]==0.66.0" s3fs pyarrow

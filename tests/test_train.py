@@ -42,15 +42,14 @@ def tracking(tmp_path, monkeypatch):
 
 def test_raw_and_warehouse_sources_give_the_same_training_table(raw, tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path}/wh.db")
-    staging = str(tmp_path / "staging")
     created = pd.read_parquet(f"{raw}/train-00000-of-00001.parquet")["datetime"]
     last = pd.to_datetime(created, utc=True).max().strftime("%Y-%m")
     for month in pd.period_range("2025-01", last, freq="M").strftime("%Y-%m"):
         start, end, batch = P.batch_bounds(month)
-        P.extract(raw, staging, start, end, batch)
-        P.validate(raw, staging, batch)
-        P.transform(raw, staging, start, end, batch)
-        P.load(engine, staging, batch)
+        P.extract(raw, engine, start, end, batch)
+        P.validate(raw, engine, batch)
+        P.transform(raw, engine, start, end, batch)
+        P.load(engine, batch)
         P.build_features(engine, raw, batch)
     from_raw, v_raw = dataset.from_raw(raw)
     from_wh, v_wh = dataset.from_warehouse(engine)

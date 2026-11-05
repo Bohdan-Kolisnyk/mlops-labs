@@ -1,11 +1,22 @@
-# Local Feast setup: parquet offline source, SQLite registry and online store.
-# Everything it writes goes to data/ (git-ignored); the definitions are in definitions.py.
+# Feast on the project stack (the same containers as the rest of the lab):
+#   offline store  parquet file in MinIO, bucket lake  (s3://lake/feast/slot_sigma.parquet)
+#   registry       PostgreSQL, database feast
+#   online store   PostgreSQL, database feast
+# ${...} are filled from .env by feast_env.py; the S3 endpoint comes from AWS_ENDPOINT_URL.
 project: truth_social
 provider: local
-registry: data/registry.db
+registry:
+  registry_type: sql
+  path: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${FEAST_DB_HOST}:5432/feast
+  cache_ttl_seconds: 0
 online_store:
-  type: sqlite
-  path: data/online.db
+  type: postgres
+  host: ${FEAST_DB_HOST}
+  port: 5432
+  database: feast
+  user: ${POSTGRES_USER}
+  password: ${POSTGRES_PASSWORD}
+  sslmode: disable  # the postgres container has no TLS; feast defaults to `require`
 offline_store:
   type: file
 entity_key_serialization_version: 3

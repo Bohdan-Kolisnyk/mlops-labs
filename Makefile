@@ -1,4 +1,4 @@
-.PHONY: setup lint test up down data etl-month months train reproduce features feast-demo
+.PHONY: setup lint test up down data etl-month months train reproduce features feast-demo materialize predict-check
 
 setup:
 	uv sync
@@ -38,5 +38,14 @@ reproduce:
 features:
 	uv run python scripts/export_slot_sigma.py
 
+# offline store = parquet in MinIO, registry + online store = PostgreSQL (needs the stack up)
 feast-demo: features
-	cd feature_repo && uv sync && uv run feast apply && uv run python demo.py
+	cd feature_repo && uv sync && uv run python apply.py && uv run python demo.py
+
+# newest sigma of each slot into the online store (the DAG does the same as its last task)
+materialize:
+	cd feature_repo && uv run python materialize.py
+
+# serving path vs training table on N test posts (stack up, champion registered, feast-demo done)
+predict-check:
+	uv run python scripts/predict.py --check 20

@@ -63,14 +63,16 @@ uv run dvc pull                 # credentials as in the Data section
 uv run python scripts/trigger_months.py          # 35 monthly DAG runs, one after another
 uv run python -m mlops_labs.train --register     # baselines, candidate, registry (commit first)
 uv run python scripts/reproduce.py               # rebuild the champion from its tags
-cd feature_repo && uv sync && uv run feast apply && uv run python demo.py
+uv run python scripts/export_slot_sigma.py      # sigma per slot: parquet into MinIO (Feast offline store)
+cd feature_repo && uv sync && uv run python apply.py && uv run python demo.py && cd ..
+uv run python scripts/predict.py --check 20      # from the text and time of a post to a score
 ```
 
-The UIs are at `localhost:8080` (Airflow), `localhost:5000` (MLflow) and `localhost:9001` (MinIO). `make months`, `make train`, `make reproduce` and `make feast-demo` run the same steps.
+The UIs are at `localhost:8080` (Airflow), `localhost:5000` (MLflow) and `localhost:9001` (MinIO). `make months`, `make train`, `make reproduce`, `make feast-demo` and `make predict-check` run the same steps.
 
 ## ETL pipeline
 
-The DAG `truth_social_etl` has six tasks: `extract`, `validate`, `transform`, `quality_check`, `load`, `build_features`. The batch is one calendar month. It comes from the run's data interval for scheduled runs or from the `month` parameter for manual runs, never from the clock.
+The DAG `truth_social_etl` has seven tasks, chained with `>>`: `extract`, `validate`, `transform`, `quality_check`, `load`, `build_features`, `materialize`. The tasks pass only metadata: each one gets its batch from the run context, reads its input from the warehouse (scratch tables `stg_posts` and `stg_clean`) or from the raw files, writes its output there and returns a few counters as XCom. The batch is one calendar month. It comes from the run's data interval for scheduled runs or from the `month` parameter for manual runs, never from the clock.
 
 **Data interval choice.** The DAG declares the interval explicitly with `schedule=CronDataIntervalTimetable("@monthly", timezone="UTC")` (Airflow 3 would otherwise give `data_interval_start == data_interval_end`). A manual run for one month sets `month` and then ignores the interval.
 
@@ -99,7 +101,20 @@ All 35 months (2023-12 to 2026-10) were loaded: 35 batches, 3,623 feature rows.
 
 ## Features
 
-`build_features` fills the table `features` (column `feature_version = v1`) from the cleaned rows. Design 5.3 states the serving-time source of every feature. The optional Feast part (`feature_repo/`, own environment because Feast pins pandas below 3) serves σ per time slot: `feast apply` and `demo.py` show that a timestamp between two feature rows returns the earlier row, that the store returns exactly the training value for all 3,623 posts (maximum difference 0.0), and that the online store holds the newest row.
+`build_features` fills the table `features` (column `feature_version = v1`) from the cleaned rows. Design 5.3 states the serving-time source of every feature.
+
+**Feature store.** Feast (`feature_repo/`, own environment because Feast pins pandas below 3) serves σ per time slot. The offline store is a parquet file in MinIO (`s3://lake/feast/slot_sigma.parquet`, written by `scripts/export_slot_sigma.py`); the registry and the online store are PostgreSQL (database `feast`, created by `feature_repo/apply.py`). `demo.py` shows that a timestamp between two feature rows returns the earlier row, that the store returns exactly the training value for all 3,623 posts (maximum difference 0.0), and that the online store holds the newest row. The last DAG task, `materialize`, refreshes the online store.
+
+## From a post to a score
+
+```bash
+uv run python scripts/predict.py --text "Tariffs on China start tomorrow" --time 2025-03-12T15:05:00Z
+uv run python scripts/predict.py --post-id <id of an archive post>
+uv run python scripts/predict.py --check 20          # serving path == training table?
+uv run python scripts/predict.py --post-id <id> --online   # sigma from the online store
+```
+
+The post is placed in its hourly bar and slot, σ comes from Feast, the other features are built by the training code (`compute_features`), the champion is loaded from the registry by its alias, and the probability is compared with the alert threshold (top 20% of the validation scores). Posts outside the 09:30 to 14:30 ET window of a trading day, or without text, are not scored and the reason is printed. `--check N` scores N test posts from text and time only and asserts that the result equals the training table.
 
 ## Experiments
 

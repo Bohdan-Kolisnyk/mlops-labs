@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Feast feature repository (own environment: feast pins pandas below 3)"
 requires-python = ">=3.12"
 dependencies = [
-    "feast==0.66.0",
+    "feast[postgres]==0.66.0",
+    "s3fs",
     "pyarrow>=17",
 ]

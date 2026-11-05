@@ -23,10 +23,20 @@ x-airflow-common: &airflow-common
     # connection details the ETL tasks use (never hard-code them in the DAG)
     WAREHOUSE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/warehouse
     RAW_DATA_DIR: /opt/airflow/data/raw
+    # the `materialize` task runs Feast (own virtualenv, see docker/Dockerfile.airflow)
+    FEAST_PYTHON: /home/airflow/feast-venv/bin/python
+    FEAST_REPO: /opt/airflow/feature_repo
+    FEAST_DB_HOST: postgres
+    FEAST_S3_ENDPOINT: http://minio:9000
+    POSTGRES_USER: ${POSTGRES_USER}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+    MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
   volumes:
     - ./dags:/opt/airflow/dags
     - ./src:/opt/airflow/src
     - ./data:/opt/airflow/data
+    - ./feature_repo:/opt/airflow/feature_repo
     - ./logs:/opt/airflow/logs
   depends_on:
     postgres:

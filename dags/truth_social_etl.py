@@ -1,6 +1,6 @@
 """Monthly ETL for the Truth Social alert system (Lab 2).
 
-extract -> validate -> transform -> quality_check -> load -> build_features
+extract -> validate -> transform -> quality_check -> load -> build_features -> materialize
 
 Batch = one calendar month. A scheduled run takes it from the run's data interval; a manual
 run takes it from the `month` parameter (for example {"month": "2025-03"}). The current
@@ -8,6 +8,15 @@ time is never used, so rerunning or back-filling a month gives the same rows.
 
 Airflow 3 does not create data intervals for a plain "@monthly" schedule (start == end), so
 the interval is declared explicitly with CronDataIntervalTimetable.
+
+The tasks do not pass data to each other. Each one works out its batch from the run context,
+reads its input from the warehouse (scratch tables stg_posts and stg_clean) or from the raw
+files, writes its output there, and returns only a few counters.
+
+The last task, materialize, publishes the newest sigma of each time slot from the Feast
+offline store (parquet in MinIO) to the online store (PostgreSQL), which scripts/predict.py
+reads with --online. The order is declared with
+`>>`, not by feeding one task's result into the next.
 """
 
 from __future__ import annotations
@@ -19,7 +28,8 @@ from airflow.sdk import DAG, Param, get_current_context, task
 from airflow.timetables.interval import CronDataIntervalTimetable
 
 RAW_DIR = os.environ.get("RAW_DATA_DIR", "/opt/airflow/data/raw")
-STAGING_DIR = os.environ.get("STAGING_DIR", "/opt/airflow/data/staging")
+FEAST_PYTHON = os.environ.get("FEAST_PYTHON", "/home/airflow/feast-venv/bin/python")
+FEAST_REPO = os.environ.get("FEAST_REPO", "/opt/airflow/feature_repo")
 
 with DAG(
     dag_id="truth_social_etl",
@@ -54,50 +64,69 @@ with DAG(
 
     @task
     def extract() -> dict:
+        """Posts of the batch from the raw files into the scratch table stg_posts."""
         from mlops_labs import pipeline
+        from mlops_labs.warehouse import get_engine
 
         b = _batch()
-        info = pipeline.extract(b["raw_dir"], STAGING_DIR, b["start"], b["end"], b["batch"])
-        return {"batch": b["batch"], "raw_dir": b["raw_dir"], **info}
+        return pipeline.extract(b["raw_dir"], get_engine(), b["start"], b["end"], b["batch"])
 
     @task
-    def validate(x: dict) -> dict:
+    def validate() -> dict:
+        """Schema and sanity checks on the extracted posts."""
         from mlops_labs import pipeline
-
-        pipeline.validate(x["raw_dir"], STAGING_DIR, x["batch"])
-        return x
-
-    @task
-    def transform(x: dict) -> dict:
-        from mlops_labs import pipeline
+        from mlops_labs.warehouse import get_engine
 
         b = _batch()
-        stats = pipeline.transform(x["raw_dir"], STAGING_DIR, b["start"], b["end"], x["batch"])
-        return {**x, **stats}
+        return pipeline.validate(b["raw_dir"], get_engine(), b["batch"])
 
     @task
-    def quality_check(x: dict) -> dict:
+    def transform() -> dict:
+        """Labels and cleaning flags into the scratch table stg_clean."""
+        from mlops_labs import pipeline
+        from mlops_labs.warehouse import get_engine
+
+        b = _batch()
+        return pipeline.transform(b["raw_dir"], get_engine(), b["start"], b["end"], b["batch"])
+
+    @task
+    def quality_check() -> dict:
         """The quality gate. Raises on a bad batch, so nothing is loaded and no features built."""
         from mlops_labs import pipeline
+        from mlops_labs.warehouse import get_engine
 
         b = _batch()
-        pipeline.quality_check(x["raw_dir"], STAGING_DIR, b["start"], b["end"], x["batch"])
-        return x
+        return pipeline.quality_check(b["raw_dir"], get_engine(), b["start"], b["end"], b["batch"])
 
     @task
-    def load(x: dict) -> dict:
+    def load() -> dict:
         """Replace the batch in the warehouse (delete-then-insert in one transaction)."""
         from mlops_labs import pipeline
         from mlops_labs.warehouse import get_engine
 
-        counts = pipeline.load(get_engine(), STAGING_DIR, x["batch"])
-        return {**x, **counts}
+        return pipeline.load(get_engine(), _batch()["batch"])
 
     @task
-    def build_features(x: dict) -> dict:
+    def build_features() -> dict:
         from mlops_labs import pipeline
         from mlops_labs.warehouse import get_engine
 
-        return pipeline.build_features(get_engine(), x["raw_dir"], x["batch"])
+        b = _batch()
+        return pipeline.build_features(get_engine(), b["raw_dir"], b["batch"])
 
-    build_features(load(quality_check(transform(validate(extract())))))
+    @task
+    def materialize() -> dict:
+        """Newest sigma of every slot from the offline store into the online store (Feast)."""
+        from mlops_labs import pipeline
+
+        return pipeline.materialize_online(FEAST_PYTHON, FEAST_REPO)
+
+    (
+        extract()
+        >> validate()
+        >> transform()
+        >> quality_check()
+        >> load()
+        >> build_features()
+        >> materialize()
+    )
