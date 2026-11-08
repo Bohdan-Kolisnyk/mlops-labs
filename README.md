@@ -19,6 +19,10 @@ Full design: [docs/design.md](docs/design.md).
 | Quality gate present | `src/mlops_labs/quality.py`; failed task screenshot [`docs/screenshots/red_airflow.png`](docs/screenshots/red_airflow.png) | Lab 2 |
 | Experiments tracked | MLflow experiment `truth-social-abnormal-moves`, [`docs/screenshots/mlflow_runs.png`](docs/screenshots/mlflow_runs.png); results in [Experiments](#experiments) and design 7.2 | Lab 2 |
 | Model registered with lineage | model `truth-social-abnormal-move` version 2, alias `champion`, tags `data_version` and `git_commit`: [`mlflow_registry.png`](docs/screenshots/mlflow_registry.png), [`mlflow_version2.png`](docs/screenshots/mlflow_version2.png); `scripts/reproduce.py` | Lab 2 |
+| Retrieval pipeline reproducible | `python -m rag_lab.ingest` rebuilds corpus → chunks → embeddings → pgvector and prints the document count; one config `rag/config.yaml`; count in [Lab 3](#lab-3-llm-baseline-and-retrieval) | Lab 3 |
+| LLM baseline logged | zero-shot run in experiment `truth-social-abnormal-moves` (model id, parameters, `test_pr_auc`, prompt hash), compared with B0 and the candidate | Lab 3 |
+| Retrieval evaluated | `rag/eval/eval_set.jsonl` (51 questions); hit rate@k, MRR and judged answer score per top-k in experiment `truth-social-llm-rag`; table in design 7.2b | Lab 3 |
+| Cost and latency known | tokens, cost, p50/p95 per run; local vs API argued in design 6.3, 6.7 and 7.1 | Lab 3 |
 
 ## Setup
 
@@ -141,6 +145,38 @@ It reads the two tags of the model version, checks that the code equals the tagg
 
 **Tolerance: 0.005 absolute PR-AUC.** On the same lock file and seed the reproduced value equals the original (difference 0.00000), also between Linux and Windows after one fix: a first version cut the TF-IDF vocabulary with `max_features`, which tied on 231 terms and broke the ties differently on the two machines (validation PR-AUC 0.162 and 0.173); the vocabulary is now cut by `min_df` only. The tolerance covers last-digit numerical noise of the solver and BLAS; it does not cover a changed data version, vocabulary or library versions, which move the metric by 0.01 or more.
 
+## Lab 3: LLM baseline and retrieval
+
+Two uses of an LLM (design 5.1, 5.3, 5.4): the same abnormal-move label predicted zero-shot (baseline), and a retrieval pipeline over the post archive with its measured market reaction, answered by Claude Haiku.
+
+Everything lives in `rag/` (own `pyproject.toml`, so the Lab 2 lock file and `reproduce.py` are untouched). One config: [`rag/config.yaml`](rag/config.yaml) (chunk size, overlap, embedding model, top-k, LLM, prices). Prompts are files with a hash logged per run: [`rag/prompts/`](rag/prompts).
+
+```powershell
+docker compose up -d                                        # warehouse is now pgvector/pgvector:pg16
+uv run python scripts/export_rag_corpus.py                  # posts + reaction -> rag/data/*.parquet
+uv run --project rag python -m rag_lab.ingest               # rebuild the index, prints the document count
+uv run --project rag python -m rag_lab.make_eval_set        # generate and filter questions (read them!)
+uv run --project rag python -m rag_lab.eval_rag             # sweep top-k 1/3/5/10, one MLflow run each
+uv run --project rag python -m rag_lab.baseline_label       # zero-shot label vs Lab 2 models
+uv run --project rag python -m rag_lab.report               # prints the table below
+uv run --project rag python -m rag_lab.ask "What did he say about tariffs in spring 2025?"
+```
+
+**Document count: 3,443 posts (3,980 chunks)**, printed by `ingest`. The query path refuses to run if the index was built with different settings (config hash stored with the index).
+
+Evaluation set: [`rag/eval/eval_set.jsonl`](rag/eval/eval_set.jsonl), 51 questions with relevant post id and reference answer; questions that share four consecutive words with their post are rejected.
+
+| top-k (chunks) | hit rate | MRR | answer score (judge, 0 to 1) | cost per question, USD | p50 s | p95 s |
+|---|---|---|---|---|---|---|
+| 1 | 0.196 | 0.196 | 0.300 | 0.00026 | 1.62 | 2.39 |
+| 3 | 0.392 | 0.288 | 0.420 | 0.00034 | 1.90 | 2.42 |
+| 5 | 0.412 | 0.292 | 0.408 | 0.00037 | 2.02 | 2.47 |
+| 10 | 0.529 | 0.309 | 0.436 | 0.00045 | 2.01 | 2.56 |
+
+51 questions; each row is one MLflow run. Cost is answer plus judge; latency is the answer call (51 calls per row).
+
+Zero-shot LLM, B0 and candidate on the same 150 test posts: PR-AUC 0.150 / 0.120 / 0.169. Cost and latency per run (tokens, USD, p50/p95 over all calls) are in MLflow and in design 6.3 and 6.7.
+
 ## Use of AI tools
 
 I used Claude as an assistant for Lab 1:
@@ -153,5 +189,10 @@ I used Claude as an assistant for Lab 1:
 For Lab 2:
 1. Plan the stages
 2. Write the first versions of the compose stack, the ETL code and DAG, the quality gate, the features, the training and reproduction scripts, the Feast repository, the tests, and the updates of README and of the design doc
+
+For Lab 3:
+1. Plan the LLM and retrieval design and the evaluation
+2. Write the first versions of the `rag/` package (ingestion, pgvector store, retrieval, evaluation, the zero-shot baseline), the prompts, and the Lab 3 text of README and design doc
+3. The evaluation questions were generated by Claude Haiku and then read by me
 
 This part is written by me, by hand. Everything is reviewed, verified and approved by me.

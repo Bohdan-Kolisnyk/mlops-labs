@@ -226,3 +226,6 @@ data/staging/
 data/raw_bad/
 
 feature_repo/data/
+
+# Lab 3 derived data (the evaluation set rag/eval/ is committed)
+rag/data/
