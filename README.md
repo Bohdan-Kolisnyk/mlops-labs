@@ -21,7 +21,7 @@ Full design: [docs/design.md](docs/design.md).
 | Model registered with lineage | model `truth-social-abnormal-move` version 2, alias `champion`, tags `data_version` and `git_commit`: [`mlflow_registry.png`](docs/screenshots/mlflow_registry.png), [`mlflow_version2.png`](docs/screenshots/mlflow_version2.png); `scripts/reproduce.py` | Lab 2 |
 | Retrieval pipeline reproducible | `python -m rag_lab.ingest` rebuilds corpus → chunks → embeddings → pgvector and prints the document count; one config `rag/config.yaml`; count in [Lab 3](#lab-3-llm-baseline-and-retrieval) | Lab 3 |
 | LLM baseline logged | zero-shot run in experiment `truth-social-abnormal-moves` (model id, parameters, `test_pr_auc`, prompt hash), compared with B0 and the candidate | Lab 3 |
-| Retrieval evaluated | `rag/eval/eval_set.jsonl` (51 questions); hit rate@k, MRR and judged answer score per top-k in experiment `truth-social-llm-rag`; table in design 7.2b | Lab 3 |
+| Retrieval evaluated | `rag/eval/eval_set.jsonl` (51 questions); hit rate@k, MRR and judged answer score per top-k in experiment `truth-social-llm-rag`; table in design 7.2 | Lab 3 |
 | Cost and latency known | tokens, cost, p50/p95 per run; local vs API argued in design 6.3, 6.7 and 7.1 | Lab 3 |
 
 ## Setup

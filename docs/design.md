@@ -220,7 +220,7 @@ The local stack follows the course reference stack with its pinned versions. AWS
 | Airflow | Apache Airflow 3.3.1, LocalExecutor | orchestrator: the monthly ETL DAG `truth_social_etl` in Lab 2; monitoring DAGs from Lab 4 (training is run by `make train`, not by Airflow) | Lab 2 | Amazon MWAA |
 | Feast | Feast 0.66.0 | feature store, in its own `feature_repo/` environment because Feast pins pandas below 3: the offline source is a parquet file in MinIO (`s3://lake/feast/slot_sigma.parquet`), the registry and the online store are PostgreSQL (database `feast`); the last task of the DAG materializes the online store | Lab 2 | SageMaker Feature Store |
 | MLflow | MLflow 3.16.1, PostgreSQL backend, MinIO artifacts | experiment tracking and model registry (alias champion) | Lab 2 | SageMaker with MLflow |
-| LLM endpoint | vLLM or a hosted API | LLM baseline and retrieval-augmented answers | Lab 3 | Amazon Bedrock |
+| LLM endpoint | Claude Haiku through the Anthropic API (chosen over a self-hosted vLLM, see 6.3 and 7.1); the model id lives in `rag/config.yaml`, the key in the environment | LLM baseline and retrieval-augmented answers; embeddings (sentence-transformers, CPU) and the vector index (pgvector, table `rag_chunks` in the warehouse PostgreSQL) run locally | Lab 3 | Amazon Bedrock |
 | Model service | container image on Minikube | online scoring API, one post per request | Lab 4 | Amazon EKS with ECR |
 | Evidently | Evidently, runs inside Airflow DAGs | drift and data-quality reports | Lab 4 | SageMaker Model Monitor |
 | Prometheus and Grafana | Prometheus, Grafana | service metrics, dashboards and alert rules | Lab 4 | Amazon CloudWatch |
@@ -365,7 +365,7 @@ Base rate of abnormal moves: 11.2% on validation, 14.1% on test. Candidate minus
 
 **Lineage.** Registered model `truth-social-abnormal-move`, version 2 (alias `champion`) carries the tags `data_version` and `git_commit` shown in `docs/screenshots/mlflow_version2.png`. `scripts/reproduce.py` rebuilds it from those two tags and reproduces validation and test PR-AUC with a difference of 0.00000 (tolerance 0.005, see the README).
 
-### 7.2b LLM baseline and retrieval (Lab 3)
+#### LLM baseline and retrieval (Lab 3)
 
 Runs are in the MLflow experiment `truth-social-llm-rag` (retrieval and answers) and, for the zero-shot label baseline, in the Lab 2 experiment `truth-social-abnormal-moves` with the same metric `test_pr_auc`. Index: 3,443 posts, 3,980 chunks, chunk size 120 words, overlap 20, `all-MiniLM-L6-v2`, pgvector HNSW cosine. Evaluation set: 51 questions. Judge: Claude Haiku, prompt `rag/prompts/judge.md` (hash in every run).
 
