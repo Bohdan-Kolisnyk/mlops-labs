@@ -24,6 +24,9 @@ class MemoryStore:
             {**self.chunks.iloc[i].to_dict(), "score": float(scores[i])} for i in top
         ]
 
+    def all_chunks(self) -> list[dict]:
+        return self.chunks.to_dict("records")
+
     def index_config_hash(self) -> str | None:
         return self.config_hash
 
@@ -84,6 +87,15 @@ class PgStore:
                 f"1 - (embedding <=> %s) AS score FROM {self.table} "
                 f"ORDER BY embedding <=> %s LIMIT %s",
                 (vector, vector, k),
+            )
+            cols = [d.name for d in cur.description]
+            return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
+
+    def all_chunks(self) -> list[dict]:
+        with self._connect() as conn:
+            cur = conn.execute(
+                f"SELECT chunk_id, post_id, chunk_no, text, created_at, y, ret FROM {self.table} "
+                f"ORDER BY chunk_id"
             )
             cols = [d.name for d in cur.description]
             return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]

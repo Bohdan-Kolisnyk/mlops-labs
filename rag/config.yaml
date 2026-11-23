@@ -10,21 +10,41 @@ embedding:
   model: sentence-transformers/all-MiniLM-L6-v2
   dim: 384
 retrieval:
+  method: hybrid                    # serving value: dense, bm25 or hybrid
+  sweep_methods: [dense, bm25, hybrid]
   top_k: 10                         # serving value; the sweep below varies it
   sweep_top_k: [1, 3, 5, 10]
+bm25:
+  k1: 1.5
+  b: 0.75
+hybrid:
+  pool: 50                          # candidates taken from each ranking before fusion
+  rrf_k: 60
 index:
   table: rag_chunks
 llm:
   provider: anthropic
   model: claude-haiku-5-5          # server address / model name live here, never in code
-  max_tokens: 400
+  max_tokens: 1500                 # 400 cut 19 of 51 answers at top-k 10, seven of them before any text
+  judge_max_tokens: 2000
   price_per_mtok_in: 0.10          # USD per million tokens, prompts under 100K tokens
   price_per_mtok_out: 0.50         # check the provider's price page before quoting these
   concurrency: 6
+llm_local:
+  base_url: http://localhost:11434/v1  # Ollama; any OpenAI-compatible server (vLLM too) works here
+  model: qwen3-4b-8k                   # built by `ollama create` from rag/ollama/Modelfile
+  max_tokens: 500
+  temperature: 0
+  timeout_s: 180
+  concurrency: 1                       # one call at a time, so latency is the model's and not a queue's
+  gpu_usd_per_hour: 0.10               # assumption: shadow price of one GPU hour, see design 6.3
 prompts:
   zero_shot: prompts/zero_shot_label.md
   rag_answer: prompts/rag_answer.md
   judge: prompts/judge.md
+  groundedness: prompts/groundedness.md
+  answer_relevance: prompts/answer_relevance.md
+  context_completeness: prompts/context_completeness.md
   gen_question: prompts/gen_question.md
 eval:
   set_path: eval/eval_set.jsonl    # committed: the evaluation set is part of the repository

@@ -2,7 +2,7 @@
 
     uv run --project rag python -m rag_lab.ingest
 
-Reads rag/data/corpus.parquet (written by scripts/export_rag_corpus.py) and every setting from
+Reads rag/data/corpus.parquet (built from data/raw by scripts/export_rag_corpus.py --corpus-only when it is missing) and every setting from
 rag/config.yaml. The index table is dropped and rebuilt, so the same corpus and the same config
 always give the same index; the config hash is stored with it.
 """
@@ -10,6 +10,9 @@ always give the same index; the config hash is stored with it.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 
 import pandas as pd
 
@@ -19,9 +22,23 @@ from rag_lab.embed import Embedder
 from rag_lab.store import PgStore
 
 
+def ensure_corpus(cfg: dict) -> None:
+    target = config.path_of(cfg["corpus"]["path"])
+    if target.exists():
+        return
+    uv = shutil.which("uv")
+    if uv is None:
+        raise SystemExit(f"{target} is missing and uv is not on PATH: run scripts/export_rag_corpus.py --corpus-only")
+    env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}
+    cmd = [uv, "run", "--project", str(config.ROOT), "python", "scripts/export_rag_corpus.py", "--corpus-only"]
+    print(f"{target.name} is missing, building it from data/raw: {' '.join(cmd)}")
+    subprocess.run(cmd, cwd=config.ROOT, env=env, check=True)
+
+
 def main() -> None:
     config.load_env()
     cfg = config.load()
+    ensure_corpus(cfg)
     corpus = pd.read_parquet(config.path_of(cfg["corpus"]["path"]))
     ch, emb = cfg["chunking"], cfg["embedding"]
     chunks = build_chunks(corpus, ch["size_words"], ch["overlap_words"], cfg["corpus"]["min_chars"])

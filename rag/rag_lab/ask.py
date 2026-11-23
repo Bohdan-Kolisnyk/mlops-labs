@@ -10,7 +10,7 @@ import argparse
 from rag_lab import config, prompts
 from rag_lab.embed import Embedder
 from rag_lab.llm import Claude
-from rag_lab.retrieval import answer_prompts, check_index, retrieve
+from rag_lab.retrieval import answer_prompts, check_index, retrieve, sparse_index
 from rag_lab.store import PgStore
 
 
@@ -20,15 +20,17 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("question")
     ap.add_argument("--top-k", type=int, default=cfg["retrieval"]["top_k"])
+    ap.add_argument("--method", choices=["dense", "bm25", "hybrid"], default=cfg["retrieval"]["method"])
     args = ap.parse_args()
 
     store = PgStore(config.warehouse_dsn(), cfg["index"]["table"], cfg["embedding"]["dim"])
     check_index(store, cfg)
-    hits = retrieve(store, Embedder(cfg["embedding"]["model"]), [args.question], args.top_k)
+    hits = retrieve(store, Embedder(cfg["embedding"]["model"]), [args.question], args.top_k,
+                    args.method, sparse_index(store, cfg, args.method), cfg["hybrid"])
     template, phash, _ = prompts.load(cfg, "rag_answer")
     reply = Claude(cfg).ask(answer_prompts(template, [args.question], hits)[0])
     print(reply.text, "\n")
-    print(f"sources (top {args.top_k}):")
+    print(f"sources (top {args.top_k}, {args.method}):")
     for h in hits[0]:
         print(f"  {h['post_id']}  score {h['score']:.3f}  {h['text'][:90]}")
     print(

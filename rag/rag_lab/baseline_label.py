@@ -10,12 +10,15 @@ the Lab 2 experiment with the same metric name (test_pr_auc).
 
 from __future__ import annotations
 
+import argparse
+import time
+
 import numpy as np
 import pandas as pd
 from sklearn.metrics import average_precision_score
 
 from rag_lab import config, prompts, track
-from rag_lab.llm import Claude, ask_many, usage
+from rag_lab.llm import ask_many, make_llm, model_name, usage
 
 PRIOR = 0.14  # fallback probability when a reply cannot be parsed
 
@@ -29,6 +32,9 @@ def probability_of(text: str) -> float | None:
 def main() -> None:
     config.load_env()
     cfg = config.load()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--answerer", choices=["anthropic", "local"], default="anthropic")
+    args = ap.parse_args()
     b = cfg["baseline"]
     test = pd.read_parquet(config.path_of(b["test_path"]))
     sample = test.sample(min(b["sample_size"], len(test)), random_state=b["seed"]).reset_index(drop=True)
@@ -38,7 +44,13 @@ def main() -> None:
         prompts.render(template, time_et=t.strftime("%Y-%m-%d %H:%M"), text=x)
         for t, x in zip(et, sample["text"], strict=True)
     ]
-    replies = ask_many(Claude(cfg), texts, cfg["llm"]["concurrency"])
+    llm = make_llm(cfg, args.answerer)
+    started = time.perf_counter()
+    workers = cfg["llm_local"]["concurrency"] if args.answerer == "local" else cfg["llm"]["concurrency"]
+    replies = ask_many(llm, texts, workers)
+    wall = time.perf_counter() - started
+    shadow = getattr(llm, "gpu_usd_per_hour", None)
+    run_cost = wall * shadow / 3600 if shadow else usage(replies)["cost_usd"]
     probs = [probability_of(r.text) for r in replies]
     failures = sum(p is None for p in probs)
     score = np.array([PRIOR if p is None else p for p in probs])
@@ -52,15 +64,18 @@ def main() -> None:
         "prior_pr_auc_same_sample": float(y.mean()),
         "parse_failures": failures,
         **{k: v for k, v in usage(replies).items() if k != "calls"},
-        "cost_per_post_usd": usage(replies)["cost_usd"] / len(replies),
+        "cost_usd": run_cost,
+        "wall_s": wall,
+        "cost_per_post_usd": run_cost / len(replies),
     }
     run_id = track.log_run(
         cfg["mlflow"]["lab2_experiment"],
-        "llm-zero-shot",
+        "llm-zero-shot" + ("" if args.answerer == "anthropic" else f"-{args.answerer}"),
         {
-            "model": cfg["llm"]["model"],
-            "temperature": "model default",
-            "max_tokens": cfg["llm"]["max_tokens"],
+            "model": model_name(cfg, args.answerer),
+            "answerer": args.answerer,
+            "temperature": "model default" if args.answerer == "anthropic" else cfg["llm_local"]["temperature"],
+            "max_tokens": cfg["llm"]["max_tokens"] if args.answerer == "anthropic" else cfg["llm_local"]["max_tokens"],
             "prompt_hash": phash,
             "sample_size": len(sample),
             "sample_seed": b["seed"],
@@ -69,7 +84,7 @@ def main() -> None:
         },
         metrics,
         files=[ppath],
-        tags={"lab": "3", "kind": "llm-baseline"},
+        tags={"lab": "3", "kind": "llm-baseline", "answerer": args.answerer},
     )
     print(f"{len(sample)} test posts ({int(y.sum())} positives), prompt {phash}")
     print(f"PR-AUC  LLM zero-shot {llm_ap:.3f} | Lab 2 candidate {cand_ap:.3f} | prior {y.mean():.3f}")

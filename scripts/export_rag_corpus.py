@@ -1,17 +1,20 @@
 """Write the Lab 3 inputs from the versioned raw data (derived files, git-ignored).
 
     uv run python scripts/export_rag_corpus.py
+    uv run python scripts/export_rag_corpus.py --corpus-only
 
 rag/data/corpus.parquet     the retrieval corpus: every labelled post with text, once (a repeated
                             text keeps its first post), with the measured reaction: y (abnormal
                             move) and ret (log return of the next two hourly bars);
 rag/data/test_posts.parquet the test posts with text, their label and the score of the Lab 2
                             champion model, for the zero-shot LLM baseline comparison.
-Needs the stack up (the champion is loaded from the MLflow registry).
+The test file needs the stack up (the champion is loaded from the MLflow registry); with
+--corpus-only only the corpus is written, from data/raw alone (after `dvc pull`).
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -26,6 +29,9 @@ OUT = ROOT / "rag" / "data"
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--corpus-only", action="store_true")
+    args = ap.parse_args()
     load_env()
     raw = ROOT / "data" / "raw"
     OUT.mkdir(parents=True, exist_ok=True)
@@ -35,6 +41,9 @@ def main() -> None:
     keep = labelled[~labelled["text_empty"] & ~labelled["dup_text"]]
     corpus = keep[["post_id", "created_at", "text", "y", "r"]].rename(columns={"r": "ret"})
     corpus.to_parquet(OUT / "corpus.parquet", index=False)
+    if args.corpus_only:
+        print(f"corpus {len(corpus)} posts -> {OUT}")
+        return
 
     table, _ = dataset.from_raw(raw)
     test = table[dataset.split_name(table["session_date"]) == "test"]

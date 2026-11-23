@@ -36,13 +36,28 @@ def path_of(cfg_path: str) -> Path:
 
 def index_hash(cfg: dict) -> str:
     """Hash of everything that decides what the index contains. The index stores it, the query
-    path compares it: a different chunk size or embedding model than the one indexed is refused."""
+    path compares it: a different chunk size or embedding model than the one indexed, or a
+    corpus whose posts changed since the index was built, is refused."""
     parts = {
         "chunking": cfg["chunking"],
         "embedding": cfg["embedding"],
         "min_chars": cfg["corpus"]["min_chars"],
+        "corpus": corpus_hash(path_of(cfg["corpus"]["path"])),
     }
     return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:12]
+
+
+def corpus_hash(path: Path) -> str:
+    """Hash of the post ids and texts of the corpus file (not of the parquet bytes), or "none"."""
+    if not path.exists():
+        return "none"
+    import pandas as pd
+
+    df = pd.read_parquet(path, columns=["post_id", "text"]).sort_values("post_id")
+    digest = hashlib.sha256()
+    for post_id, text in zip(df["post_id"], df["text"], strict=True):
+        digest.update(f"{post_id}\x1f{text}\x1e".encode())
+    return digest.hexdigest()[:12]
 
 
 def file_hash(path: Path) -> str:

@@ -89,3 +89,42 @@ def quotes_the_post(question: str, post_text: str, n: int = 4) -> bool:
     """True when the question shares a run of n words with the post: such a question is
     answered by string overlap and tells nothing about the retriever."""
     return bool(_ngrams(question, n) & _ngrams(post_text, n))
+
+
+def claim_stats(claims: list[dict], n_passages: int) -> dict:
+    """Groundedness of one answer from its judged claims.
+
+    groundedness: share of claims the passages support; hallucinated: at least one claim they do
+    not support; utilization: share of the retrieved passages that support some claim.
+    An answer without claims (it only says the passages do not hold the answer) has none of these.
+    """
+    total = len(claims)
+    if total == 0:
+        return {"claims": 0, "supported": 0, "groundedness": None, "hallucinated": None, "utilization": None}
+    supported = [c for c in claims if c.get("supported") is True]
+    used = {
+        c["passage"]
+        for c in supported
+        if isinstance(c.get("passage"), int)
+        and not isinstance(c.get("passage"), bool)
+        and 1 <= c["passage"] <= n_passages
+    }
+    return {
+        "claims": total,
+        "supported": len(supported),
+        "groundedness": len(supported) / total,
+        "hallucinated": len(supported) < total,
+        "utilization": len(used) / n_passages if n_passages else 0.0,
+    }
+
+
+def quality_summary(stats: list[dict]) -> dict[str, float]:
+    """Run-level metrics from per-answer claim_stats; abstentions are counted apart."""
+    with_claims = [s for s in stats if s["claims"] > 0]
+    nan = float("nan")
+    return {
+        "groundedness": float(np.mean([s["groundedness"] for s in with_claims])) if with_claims else nan,
+        "hallucination_rate": float(np.mean([s["hallucinated"] for s in with_claims])) if with_claims else nan,
+        "context_utilization": float(np.mean([s["utilization"] for s in with_claims])) if with_claims else nan,
+        "abstain_rate": float(np.mean([s["claims"] == 0 for s in stats])) if stats else nan,
+    }
