@@ -1,0 +1,36 @@
+# The scheduled monitoring job. Every 5 minutes here so that two windows show in the demonstration;
+# a production schedule would be hourly (design 6.6). It reads the reference window and the request
+# log from the shared volume and pushes its numbers to the Pushgateway.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: drift-monitor
+  labels: {app: drift-monitor}
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels: {app: drift-monitor}
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: monitor
+              image: mlops-labs-monitor:__TAG__
+              imagePullPolicy: IfNotPresent
+              envFrom:
+                - configMapRef: {name: app-config}
+              resources:
+                requests: {cpu: 200m, memory: 384Mi}
+                limits: {memory: 1Gi}
+              volumeMounts:
+                - {name: data, mountPath: /data}
+          volumes:
+            - name: data
+              persistentVolumeClaim: {claimName: mlops-data}

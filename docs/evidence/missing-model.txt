@@ -1,0 +1,26 @@
+== 1. the model is absent: alias 'no-such-alias' ==
+$ kubectl get pods -l app=ml-service
+NAME                          READY   STATUS    RESTARTS   AGE
+ml-service-788b4b9fb6-rfnp6   0/1     Running   0          35s
+$ kubectl get endpoints ml-service
+NAME         ENDPOINTS   AGE
+ml-service               102m
+GET /health on the pod -> 503 {'status': 'not_ready', 'reason': 'RestException: INVALID_PARAMETER_VALUE: Registered model alias no-such-alias not found.', 'attempts': 6}
+GET /livez on the pod  -> 200 {'status': 'alive'}
+POST /predict on the pod -> 503 {'detail': 'model not loaded: RestException: INVALID_PARAMETER_VALUE: Registered model alias no-such-alias not found.'}
+$ kubectl describe pod (readiness events)
+    Ready:          False
+    Readiness:  http-get http://:8000/health delay=0s timeout=3s period=5s #success=1 #failure=3
+  Warning  Unhealthy  31s (x3 over 35s)  kubelet            spec.containers{ml-service}: Readiness probe failed: Get "http://10.244.0.45:8000/health": dial tcp 10.244.0.45:8000: connect: connection refused
+  Warning  Unhealthy  1s (x6 over 26s)   kubelet            spec.containers{ml-service}: Readiness probe failed: HTTP probe failed with statuscode: 503
+$ kubectl get pods -l app=ml-service   (restarts must stay 0: a missing model is not a liveness failure)
+NAME                          READY   STATUS    RESTARTS   AGE
+ml-service-788b4b9fb6-rfnp6   0/1     Running   0          36s
+
+== 2. the model is back: alias 'champion' ==
+NAME                          READY   STATUS        RESTARTS   AGE
+ml-service-788b4b9fb6-rfnp6   0/1     Terminating   0          48s
+ml-service-cfd98dc99-ldxmr    1/1     Running       0          11s
+NAME         ENDPOINTS          AGE
+ml-service   10.244.0.47:8000   102m
+GET /health -> 200 {'status': 'ready', 'model_version': '1'}

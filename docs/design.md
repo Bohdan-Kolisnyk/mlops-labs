@@ -176,9 +176,10 @@ These are prototype counts for all labelled posts; the Lab 2 pipeline reproduces
 
 All roles are played by one person, but they are kept separate in the design.
 
-- **Analyst:** receives alerts and can mark each as useful or not (optional feedback).
-- **System owner:** reviews every drift alert (Evidently report and the dashboard) by the end of the next trading day, and approves or rejects each model promotion after reading the comparison report.
-- **Override:** the owner can roll the `champion` alias back to the previous version and set the alert threshold by configuration. The analyst can mute the alert channel.
+- **Analyst:** receives the alerts of the model (top 20% of posts by probability) and can mark each as useful or not through `POST /feedback` (optional; the label joins the request log and feeds the quality panel).
+- **System owner:** receives every drift and service alert in the Telegram chat of the alert bot (Alertmanager sends it; the bot token and chat id come from `.env`, never from the repository). Reads the Grafana dashboard and the Evidently report of the run that fired, and answers by the end of the next trading day: ignore with a reason, retrain, or roll back.
+- **Approval of a promotion:** nothing promotes itself. A drift alert makes the responder start one retrain Job that registers the new version under the alias `candidate` and tells the owner in the same chat; the owner compares it with the champion in MLflow and runs `python deploy/promote.py --version N`, which moves the alias `champion`, restarts the Deployment and checks `/predict` (no image is rebuilt). The setting `RETRAIN_PROMOTE=guarded` is the optional automatic path: it promotes only when the candidate's validation PR-AUC is at least the champion's minus 0.02 and its PR-AUC on the newest labelled window is higher; the default is `never`.
+- **Override:** `python deploy/promote.py --rollback` moves `champion` back to the version kept under `previous`. The alert threshold of the model is a tag of the model version (`alert_threshold`, the top 20% of validation scores); the drift thresholds are values in the ConfigMap `app-config`. The analyst can mute the alert channel, and the responder starts at most one retrain Job per hour (cooldown) so that a noisy drift cannot flood the cluster.
 
 ## 6 Implementation
 
@@ -204,9 +205,15 @@ In Lab 2 the layers are these Airflow tasks of the DAG `truth_social_etl`, chain
 
 ![Retrieval pipeline](diagrams/retrieval.svg)
 
-**Deployment, first draft.** Every component carries the lab in which it first runs; Lab 4 replaces this diagram with the real cluster topology.
+**Deployment as built in Lab 4.** One namespace `mlops` on Minikube. The two services, the registry and the database are Deployments with Services; the model files and the request log live on PersistentVolumeClaims; the first model and the vector index are built by two Jobs at bring-up; the drift job is a CronJob; Prometheus, the Pushgateway, Alertmanager and Grafana watch everything; the responder turns a drift alert into one retrain Job. The images are built from the repository inside Minikube and tagged with the commit. The answering model is the Anthropic API, outside the cluster.
 
-![Deployment](diagrams/deployment.svg)
+![Cluster topology](diagrams/cluster.svg)
+
+**Drift-to-action loop.** A shifted batch is replayed through the ML service, which logs every request. The CronJob compares the last 300 logged requests with the reference window (1,000 training rows scored by the champion) and pushes the numbers to the Pushgateway; Prometheus evaluates the rules, Alertmanager routes the alert to the owner on Telegram and to the responder, which starts the retrain Job.
+
+![Drift-to-action loop](diagrams/drift-loop.svg)
+
+The first-draft diagram of Lab 1 and Lab 2 stays in the repository as [`diagrams/deployment.svg`](diagrams/deployment.svg) for comparison; it showed Airflow and the Compose stack, which are not part of the cluster.
 
 ### 6.2 Infra
 
@@ -217,17 +224,22 @@ The local stack follows the course reference stack with its pinned versions. AWS
 | MinIO | pgsty/silo, S3-compatible | object storage: raw, clean and feature files, DVC remote, MLflow artifacts | Lab 2 | Amazon S3 |
 | DVC | DVC 3.67.1 with dvc-s3, remote on MinIO | data versioning of posts and price bars (version point) | Lab 2 | S3 remote |
 | PostgreSQL | PostgreSQL 16 (pgvector image) | MLflow and Airflow metadata, the warehouse (`raw_posts`, `clean_posts`, `features` and the scratch tables `stg_posts`, `stg_clean` between ETL tasks), the Feast registry and online store (database `feast`), recent posts, prediction log; pgvector index from Lab 3 | Lab 2 | Amazon RDS for PostgreSQL |
-| Airflow | Apache Airflow 3.3.1, LocalExecutor | orchestrator: the monthly ETL DAG `truth_social_etl` in Lab 2; monitoring DAGs from Lab 4 (training is run by `make train`, not by Airflow) | Lab 2 | Amazon MWAA |
+| Airflow | Apache Airflow 3.3.1, LocalExecutor | orchestrator: the monthly ETL DAG `truth_social_etl` in Lab 2 (training is run by `make train`, not by Airflow; the Lab 4 drift job is a Kubernetes CronJob because Airflow stays in Compose, outside the cluster) | Lab 2 | Amazon MWAA |
 | Feast | Feast 0.66.0 | feature store, in its own `feature_repo/` environment because Feast pins pandas below 3: the offline source is a parquet file in MinIO (`s3://lake/feast/slot_sigma.parquet`), the registry and the online store are PostgreSQL (database `feast`); the last task of the DAG materializes the online store | Lab 2 | SageMaker Feature Store |
 | MLflow | MLflow 3.16.1, PostgreSQL backend, MinIO artifacts | experiment tracking and model registry (alias champion) | Lab 2 | SageMaker with MLflow |
 | LLM endpoint | Claude Haiku through the Anthropic API (chosen over a self-hosted model that was measured in Lab 3, see 6.3 and 7.1); the model id lives in `rag/config.yaml`, the key in the environment | LLM baseline and retrieval-augmented answers; embeddings (sentence-transformers, CPU) and the vector index (pgvector, table `rag_chunks` in the warehouse PostgreSQL) run locally | Lab 3 | Amazon Bedrock |
-| Model service | container image on Minikube | online scoring API, one post per request | Lab 4 | Amazon EKS with ECR |
-| Evidently | Evidently, runs inside Airflow DAGs | drift and data-quality reports | Lab 4 | SageMaker Model Monitor |
-| Prometheus and Grafana | Prometheus, Grafana | service metrics, dashboards and alert rules | Lab 4 | Amazon CloudWatch |
-| Post replayer | Python script, outside the cluster | emulated live feed: sends archive posts to the model service in time order | Lab 4 | Amazon Kinesis |
-| Alert channel | chat webhook | delivers alerts to the analyst and drift alerts to the system owner | Lab 4 | Amazon SNS |
+| Model service | image `mlops-labs-ml:<commit>` (FastAPI, uvicorn) on Minikube: Deployment and Service; readiness `/health` answers 200 only when the champion is loaded and has answered a smoke prediction, otherwise 503 with the reason; liveness `/livez` | online scoring: `POST /predict` (a list of posts with their feature values), `/feedback`, `/admin/reload`, `/metrics`; the model is loaded by `models:/truth-social-abnormal-move@champion` and every scored row is appended to the request log | Lab 4 | Amazon EKS with ECR |
+| LLM service | image `mlops-labs-llm:<commit>` (FastAPI, CPU torch, the MiniLM embedder baked in): Deployment and Service; readiness needs the API key, an index whose hash matches the config and one probe retrieval (no paid call); liveness `/livez` | `POST /ask`: retrieval from pgvector and an answer from Claude Haiku; settings are the Lab 3 `rag/config.yaml` and `rag/prompts/`, mounted as ConfigMaps | Lab 4 | Amazon EKS with ECR; Bedrock for the model |
+| MLflow in the cluster | official 3.16.1 image plus `psycopg2-binary`, PostgreSQL backend, artifacts served by the server (`--serve-artifacts`) from a PVC | registry with the aliases `champion`, `previous` and `candidate`; promotion is an alias move | Lab 4 | SageMaker with MLflow |
+| PostgreSQL in the cluster | `pgvector/pgvector:pg16`, databases `mlflow` and `warehouse` | MLflow backend and the `rag_chunks` index (the Compose Postgres of Lab 2 and 3 stays for the pipeline) | Lab 4 | Amazon RDS for PostgreSQL |
+| Bring-up Jobs | `model-bootstrap`, `rag-ingest` | train and register the first champion from the committed seed (`deploy/seed/`, the DVC data version is recorded as a tag) and write the reference window; build the vector index, idempotent | Lab 4 | SageMaker Pipelines (lecture only) |
+| Evidently | Evidently 0.7.14, in the CronJob `drift-monitor` | `DataDriftPreset` on the 10 input features and a second drift test on the predicted probability, every 5 minutes in the demo (hourly is the production proposal); writes an HTML and a JSON report to the PVC | Lab 4 | SageMaker Model Monitor |
+| Prometheus stack | Prometheus 3.2.1 (7 days of data), Pushgateway 1.11.0, Alertmanager 0.28.1, Grafana 11.5.2 with a provisioned dashboard | scrape `/metrics` of both services and the Pushgateway; 13 alert rules; routing; the dashboard with drift, service, freshness and quality rows | Lab 4 | Amazon CloudWatch |
+| Responder | stdlib Python webhook, ServiceAccount allowed to create, list and get Jobs in its namespace only | starts one retrain Job per drift alert, at most one per hour | Lab 4 | Amazon EventBridge with a Step Functions task |
+| Post replayer | `scripts/replay.py`, outside the cluster | emulated live feed: sends held-out archive rows to `/predict` in batches, baseline or shifted (Badgers) | Lab 4 | Amazon Kinesis |
+| Alert channel | Telegram bot, through the Alertmanager `telegram_configs` | delivers drift and service alerts to the system owner | Lab 4 | Amazon SNS |
 
-The cluster itself is Minikube 1.33.1 (Kubernetes 1.30.0, docker driver, 4 GB); its AWS equivalent is Amazon EKS.
+The cluster itself is Minikube (Kubernetes 1.30.0, docker driver, 4 GB by default; `deploy/up.py` takes `--memory` and `--cpus`); its AWS equivalent is Amazon EKS. Feast stays in Compose: in the cluster the caller sends the feature values with the post, and the bootstrap Job trains from the committed seed table, which is the Lab 2 training table exported once (`scripts/export_seed.py`, 3,623 rows, data version `d756bd56a53aee1182a62f609dab15bc.dir`).
 
 **External services, not run by the project.** Hugging Face hosts the posts archive. Yahoo Finance provides the hourly price bars and the price feed (through the yfinance library).
 
@@ -248,12 +260,14 @@ The cluster itself is Minikube 1.33.1 (Kubernetes 1.30.0, docker driver, 4 GB); 
 
 **Batch or online.** Online for scoring: posts arrive at irregular times and the value of an alert decays within the 1 to 2 hour label window, so an hourly batch would deliver some alerts up to 60 minutes late. Batch for everything that does not need to be immediate: ingestion, labels, training and drift reports run as scheduled Airflow DAGs, because labels arrive 1 to 2 hours after the post and the model is retrained monthly. The LLM component of Lab 3 is not on the 500 ms scoring path.
 
+**Measured on Minikube (Lab 4).** `python deploy/benchmark.py` sends requests through the Service and writes [`docs/evidence/benchmark.md`](evidence/benchmark.md); the numbers are copied to 7.3 (one run on the author's machine, so they are indicative; the machine is named in 7.3 and the README). The cluster path has no Feast or price-feed lookups, because the caller sends the feature values; what is measured is therefore the model call, the request logging and the network inside the cluster.
+
 **LLM latency and the inference choice (Lab 3).** Measured on 51 RAG answers at top-k 10 with hybrid retrieval (the serving default) and Claude Haiku through the API: p50 2.14 s and p95 4.05 s per answer (retrieval and embedding of the question add a few tens of milliseconds on CPU). Assumption: an analyst reading an answer tolerates up to 5 s at p95, so the measured 4.05 s fits. This is outside the 300 ms budget of online scoring on purpose: the LLM answers analyst questions and is not in the alert path; the alert path stays with the Lab 2 model. Choice: an API, not a self-hosted model. For this corpus (public, few thousand short posts) privacy is not a cost; the API needs no GPU, and the course stack is CPU-only by assumption (a GPU would be an extra requirement for whoever reruns this); the price is a network round trip, a per-token cost, rate limits, and a dependency on a provider that can change the model behind a name (the model name and the prompt hashes are logged in every run, so a change shows up as a metric shift between runs). Self-hosting was measured and not only argued: Qwen3-4B-Instruct-2507 (Q4_K_M, 2.5 GB) served by Ollama on the author's 8 GB RTX 4060 answers the same 51 questions with an answer score of 0.43 against 0.53 to 0.57 for Haiku, p50 3.7 to 7.2 s and p95 4.7 to 9.2 s (the 5 s assumption holds only in the better run, at k=5), a 13.7 s first call after the model was unloaded, and a higher hallucination rate (0.125 and 0.200 against 0.080 and 0.037, on 24 and 25 answers); details in 7.2. A comparable-quality model would need a larger GPU than this laptop has, so the API stays.
 
 ### 6.4 Security
 
-- **Secrets.** MinIO keys, the PostgreSQL password, the chat webhook URL and any LLM API key live in a local `.env` file that git ignores, and in Kubernetes Secrets on Minikube from Lab 4. The DVC remote credentials are kept in `.dvc/config.local`, which git ignores, and only the remote URL is committed. Nothing secret is committed; the Lab 1 CI needs no secrets. AWS equivalent: AWS Secrets Manager.
-- **Who may call the service.** The model service is reachable only inside the cluster or through a local port-forward. Its callers are the post replayer and, from Lab 5, the agent. Airflow, MLflow, MinIO and Grafana web interfaces listen on localhost only. In Lab 2 Airflow runs with its all-admins simple auth manager and MLflow without authentication (assumption: a single-user local stack); passwords are added in Lab 4 when the interfaces are deployed.
+- **Secrets.** MinIO keys, the PostgreSQL password, the chat webhook URL and any LLM API key live in a local `.env` file that git ignores, and in Kubernetes Secrets on Minikube from Lab 4: `app-secrets` (database and Grafana passwords, the API key), `notify-secrets` (the Telegram token and chat id) and `alertmanager-config` (the Alertmanager file that carries the token). `deploy/up.py` reads the key and the Telegram values from `.env` and generates the cluster passwords on the first run into `deploy/.cluster.env`, which git ignores; the pods read the Secrets as environment variables or mounted files, and the Alertmanager config is a Secret, not a ConfigMap, because it holds the token. The DVC remote credentials are kept in `.dvc/config.local`, which git ignores, and only the remote URL is committed. Nothing secret is committed; the Lab 1 CI needs no secrets. AWS equivalent: AWS Secrets Manager.
+- **Who may call the service.** The model service is reachable only inside the cluster or through a local port-forward. Its callers are the post replayer and, from Lab 5, the agent. Airflow, MLflow, MinIO and Grafana web interfaces listen on localhost only. In Lab 2 Airflow runs with its all-admins simple auth manager and MLflow without authentication (assumption: a single-user local stack); in Lab 4 all cluster Services are ClusterIP and are reached from the laptop only through `python deploy/ports.py` (kubectl port-forward bound to localhost); MLflow, Prometheus and Alertmanager keep no authentication (same assumption), Grafana has an admin password from the Secret and anonymous read-only access for the screenshots. The responder may only create, list and get Jobs in the namespace `mlops` (a Role, not a ClusterRole), so a stolen alert cannot do more than start retrain Jobs.
 - **Supply chain.** The Python environment is pinned by `uv.lock`, and container images use the pinned versions of the reference stack.
 
 ### 6.5 Data privacy
@@ -261,7 +275,7 @@ The cluster itself is Minikube 1.33.1 (Kubernetes 1.30.0, docker driver, 4 GB); 
 - **What personal data the dataset contains.** Public posts by a public figure, with engagement counts and media links. Posts can mention other people by name, including private individuals. No data about the analyst or other users is collected beyond the alert channel address.
 - **What is kept and for how long.** Post text, timestamps and the price bars are kept for the duration of the course, versioned with DVC so that every run can be reproduced. Media files are not downloaded, only their links are stored. The prediction log is kept for 90 days (assumption).
 - **Deleted posts.** If a post disappears from the upstream archive, it disappears from the next monthly version; older DVC versions still contain it (accepted for coursework, stated here).
-- **Licences and terms.** The posts dataset is CC-BY-NC-4.0 (non-commercial use with attribution, given in the README). Yahoo Finance data is used for personal, non-commercial study. Neither the posts nor the bars are published: the DVC remote is the local MinIO, not a public bucket, and the public repository holds only code and documents.
+- **Licences and terms.** The posts dataset is CC-BY-NC-4.0 (non-commercial use with attribution, given in the README). Yahoo Finance data is used for personal, non-commercial study. The posts and the bars are not published as a dataset: the DVC remote is the local MinIO, not a public bucket. One exception since Lab 4: `deploy/seed/` holds a small derived copy (the training table of 3,623 posts with their features, which include price-derived values such as σ and the last bar return but no raw bars, and the post corpus for the retrieval index), so that a clean clone can bring the cluster up with one command. It keeps the CC-BY-NC-4.0 attribution given in the README, is for non-commercial coursework, and can be removed from the repository without affecting anything except that one-command bring-up.
 
 ### 6.6 Monitoring and alarms
 
@@ -279,7 +293,24 @@ The cluster itself is Minikube 1.33.1 (Kubernetes 1.30.0, docker driver, 4 GB); 
 
 As built in Lab 2, the gate runs nine checks between `transform` and `load`: schema, row count of at least 10, no nulls in key columns, unique `post_id`, timestamps inside the batch interval, post time slot inside the window, share of empty texts, label rate between 0% and 50%, and bars per trading day (7 or 3).
 
-The data freshness alert watches the data itself, not the job status, so a pipeline that succeeds while reading the same stale partition is still caught. Lab 4 turns this table into Evidently reports, Prometheus rules and Grafana dashboards.
+The data freshness alert watches the data itself, not the job status, so a pipeline that succeeds while reading the same stale partition is still caught.
+
+**As built in Lab 4.** The first-draft table above stays as the plan; this is what runs in the cluster and where it differs.
+
+| What | Metric and rule | Threshold | Who receives it |
+|---|---|---|---|
+| Input drift, the alert | `FeatureDriftSigma`: the Kolmogorov-Smirnov p-value of σ in the current window against the reference window, from Evidently | p below 0.001, critical | system owner (Telegram); also starts the retrain Job |
+| Input drift, the breadth | `DriftShareHigh`: share of the 10 monitored input columns that Evidently flags (p below 0.05) | 0.3 or more | system owner; also starts the retrain Job |
+| Prediction drift | `PredictionDrift`: the p-value of the predicted probability; `drift_alert_rate` is shown against the reference rate | p below 0.001, warning | system owner |
+| Freshness | `RequestLogStale` (no request for 6 hours), `DriftMonitorNotRunning` (no run for 900 s), `DriftMonitorFailed` | as stated | system owner |
+| Service | `MLServiceDown`, `MLModelNotLoaded`, `MLRequestLogWriteFailing`, `MLHighErrorRate`, `MLHighLatency`, `LLMServiceDown`, `LLMUpstreamErrors` | down for 1 to 2 minutes; more than 5% of `/predict` requests failing with 5xx for 5 minutes; p95 of `/predict` above 1 s for 5 minutes (looser than the 500 ms budget on purpose, a first-draft value that the benchmark in 7.3 can tighten) | system owner |
+| Quality, when labels arrive | `quality_pr_auc`, `quality_precision_at_alert`, `quality_coverage_at_alert` on the labelled rows of the window (at least 30), next to the reference values | shown on the dashboard, not alerted: a window of 300 requests holds too few positives for a stable PR-AUC | system owner |
+
+**Window and schedule.** The current window is the last 300 logged requests scored by the reference model version, with at least 100 required; below that the job pushes only the freshness numbers. The reference window is 1,000 training rows scored by the champion at the moment it was registered, and it is rewritten when a candidate is promoted. The CronJob runs every 5 minutes so that the demonstration finishes in minutes; for production the proposal is hourly (the posts arrive about once an hour on average, so 5 minutes only re-reads the same window).
+
+**Why the threshold is on σ and at p below 0.001.** The consumer of the drift alert is the system owner, who decides on a retrain; the alert must say "the model is now answering a different question", not "the world changed a little". σ, the standard deviation of the same time slot over the previous 20 trading days, is the one feature that defines the label (an abnormal move is one that exceeds 1.5σ), so a shift in σ changes the base rate and the meaning of the alert threshold at once, and the other features only move the score. A strict p below 0.001 is chosen because with 300 against 1,000 rows the usual 0.05 is crossed by ordinary sampling noise and by the slow growth of post length over the years (measured: on the held-out 2026 rows 50% to 70% of the input columns drift against the training rows at p below 0.05, so a share rule alone would alert on real data). The false-alarm rate accepted is below one in a thousand windows for a stable σ; the cost of a miss is a model that keeps alerting on the wrong posts (in the calibration the alert rate fell from 0.24 to 0.09 while the threshold stayed where it was) until the owner notices in the next monthly review, which is why the breadth rule `DriftShareHigh` (0.3) backs it up. Calibration: no shift gives a share of 0.00 and p of σ far above the threshold; σ plus 3 batch standard deviations in 40% of the rows gives p = 2.3e-33 for σ, 9.3e-24 for the prediction and a share of 0.10, so the σ rule fires while the breadth rule does not, and each is shown by the replay in the README.
+
+**Natural drift is a finding, not noise.** Posts get longer over the archive (mean text length 142 characters in 2023, 241 in 2024, 313 in 2025, 459 in the held-out 2026 rows), so the held-out test rows drift against the training reference without any injected shift. The replay therefore draws its baseline from the rest of the training period (`--source train-rest`); `--source test` shows the natural drift. This is also the reason for the monthly retrain in the plan.
 
 ### 6.7 Cost
 
@@ -303,6 +334,8 @@ Estimated with the AWS Pricing Calculator: region US East (N. Virginia), on-dema
 | **Total** | | **985.98** (11,831.76 a year) |
 
 Two always-on managed services, MWAA and the MLflow tracking server, make up about 81% of the total. The cheaper variant runs Airflow and MLflow on the EKS nodes instead (for example 2 × t3.large), at roughly 250 USD per month (a rough estimate, not in the saved calculator estimate), at the cost of operating them ourselves. If the estimate turns out ten times too low, the most likely wrong assumption is the size or running hours of these two services; the first requirement to relax is availability outside the trading session (stop them overnight and at weekends).
+
+**Serving cost of the cluster (Lab 4).** Every pod has a memory request and limit (limits: 768 Mi for the ML service and MLflow, 1,536 Mi for the LLM service, 1 Gi for the drift job); the sum of the requests fits the 4 GB Minikube node, and the measured use is in 7.3. The always-on services of the cluster map to the EKS line above (two t3.medium nodes hold the same pods); the drift CronJob runs for a short time per run (`drift_run_duration_seconds` on the dashboard) and adds no node. The LLM service adds the API cost measured in Lab 3 and nothing else; its tokens and USD are counted by `llm_tokens_total` and `llm_cost_usd_total` on the dashboard. The trade-off that Lab 4 makes visible: the embedding model is baked into the LLM image and runs on CPU inside the service (memory request 600 Mi), so the only paid call is the answer; the price is the largest image and the slowest build.
 
 **Measured LLM cost (Lab 3).** From the runs in MLflow: 0.00053 USD per RAG question (answer plus the judge against the reference) at top-k 10 with hybrid retrieval, with Claude Haiku at 0.10 USD per million input tokens and 0.50 per million output tokens; the zero-shot label baseline costs 0.00011 USD per post. At the 1,800 requests a month assumed above this is at most about 0.95 USD a month (the figure includes the reference judge, which the service does not call), replacing the Bedrock estimate for the LLM line (5.87 USD). The embedding model and the vector index run on CPU inside the existing PostgreSQL and cost nothing extra. A self-hosted answerer was priced at a shadow 0.10 USD per GPU hour (an assumption): 0.00012 to 0.00020 USD per answer against 0.00028 to 0.00038 for the API, but at 1,800 requests a month the GPU is busy two hours and a card rented around the clock would cost about 73 USD a month, so it is not cheaper at this volume. The three quality judges add 0.00108 USD per evaluated question at top-k 10, twice the cost of answering; that is an evaluation cost and does not occur in serving.
 
@@ -331,7 +364,14 @@ Two always-on managed services, MWAA and the MLflow tracking server, make up abo
 | Leakage through features computed after the post or through near-duplicate posts | Time split, point-in-time joins in Feast, deduplication in preprocessing. |
 | Concept drift: new topics and market regimes | Drift monitoring (6.6) and monthly retraining with human approval. |
 | The laptop cannot run the whole stack at once (Minikube has 4 GB) | Lab 2 services run in Docker Compose; only the serving side moves to Minikube in Lab 4; the LLM runs outside the cluster. |
-| Licence and terms: CC-BY-NC for the posts, Yahoo Finance terms for prices | Non-commercial coursework only; data is never published in the public repository. |
+| The history of Prometheus and Grafana is lost when their pods are replaced (emptyDir storage; the request log, the reports and the registry are on PVCs) | Stated; a PVC is the one-line change, not needed for a demonstration. The reports of every run are kept on the PVC. |
+| Natural drift: the held-out period differs from the training period on many columns (post length grows) | The alert is on σ at p below 0.001 and the baseline replay uses the training period; the monthly retrain covers the slow part (6.6). |
+| The alert watches σ only, so a shift in another feature alone is caught only by the breadth rule (0.3) | `DriftShareHigh` and `PredictionDrift` back it up; the dashboard shows every feature p-value. |
+| A window of 300 requests holds too few labelled positives for a stable PR-AUC, and a retrain on them is noisy | The quality numbers are shown, not alerted; the retrain uses the seed plus the window and is promoted only by the owner (or by the guard when switched on). |
+| A drift alert repeated every few minutes starts a retrain every few minutes | Cooldown of one hour in the responder, Alertmanager repeats a firing alert every 12 hours. |
+| No API key in the cluster: the LLM service stays not ready (the ML service is independent of it) | The readiness reason is returned by `/health`; the smoke test of `up.py` asks `/ask` only when a key exists. |
+| The cluster results here come from one laptop and one run | Every number in 7.3 and the README names the machine and the commit; the evidence files are written by the scripts, not typed. |
+| Licence and terms: CC-BY-NC for the posts, Yahoo Finance terms for prices | Non-commercial coursework only; the only published data is the small attributed seed of Lab 4 (6.5). |
 
 ## 7 Appendix
 
@@ -437,7 +477,20 @@ Zero-shot label with the local model (150 test posts, 18 positives, no parse fai
 
 ### 7.3 Performance benchmarks
 
-Placeholder: filled in Lab 4.
+Written by `python deploy/benchmark.py` to [`docs/evidence/benchmark.md`](evidence/benchmark.md) and copied here: the ML service latency for one post, for a batch of 50 posts and for 4 concurrent clients, the LLM service latency, tokens and cost for the first 10 evaluation questions, and the memory and CPU of every pod from `kubectl top`. One run, from the host through `kubectl port-forward`, so every number includes the forward and the Windows host stack; inside the cluster the latencies would be lower. The budget of 6.3 (p95 at most 500 ms) is the number they are compared with.
+
+| Measure | Value |
+|---|---|
+| Machine, Minikube, image | Windows 11, Docker Desktop 16 GB, Minikube v1.39.0 (Kubernetes v1.30.0, 4096 MB, 2 CPUs); image tag `76644f4-dirty` |
+| ML service, 1 post, 500 sequential requests, p50 / p95 / p99 | 12.7 / 34.6 / 77.1 ms, 60 req/s |
+| ML service, 50 posts per request, 20 requests, p50 / p95 | 14.9 / 28.7 ms, 3,099 rows/s |
+| ML service, 4 concurrent clients, 300 requests, p50 / p95 / p99 | 64.3 / 121.9 / 187.4 ms, 57 req/s |
+| LLM service (`claude-haiku-5-5`), 10 questions, p50 / p95 | 2.43 / 4.20 s (retrieval 0.443 s, answer call 2.16 s) |
+| LLM service, tokens in / out and cost per answer, mean | 1,772 / 396 tokens, 0.00038 USD |
+| Pod memory after the run | llm-service 494 Mi, mlflow 365 Mi, ml-service 190 Mi, grafana 86 Mi, prometheus 53 Mi, postgres 50 Mi, alertmanager 23 Mi, responder 15 Mi, pushgateway 14 Mi |
+| Pod CPU after the run | 1 to 21 millicores per pod (grafana 21, postgres 18, the others 5 or less) |
+
+**Reading.** Scoring is far inside the budget: p95 of 35 ms for one post and 122 ms under 4 clients, against 500 ms; the first-draft alert `MLHighLatency` at 1 s for 5 minutes (6.6) has room to be tightened to the 500 ms budget. Fifty posts in one request cost 14.9 ms against 12.7 ms for one, so the time is the forward, the HTTP round trip and the request log, not the model; the real load of 6.3 (peak 67 posts an hour, about one a minute) is a small fraction of the 60 req/s that one instance sustained here. Four clients do not raise the throughput (57 against 60 req/s) and the latency grows about five times; the cause was not isolated (one uvicorn worker with synchronous handlers on 2 CPUs, or the single `kubectl port-forward` tunnel itself), and it does not matter at this load, but it is the first thing to check, from a client inside the cluster, if the load grew. The LLM answer takes a median 2.43 s, of which the API call is 2.16 s; p95 equals the maximum because there are only 10 questions, and it is under the 5 s assumption of 6.3 for the API path. The cost of 0.00038 USD per answer equals the Haiku row of the Lab 3 evaluation at k=10 (0.00038 USD, p50 2.14 s, p95 4.05 s), so the service adds no measurable overhead to the pipeline. The memory of every pod is below its limit with room (the MLflow limit of 1536 Mi is the one that was raised after the OOM kill, now 365 Mi in use). Limits of the measurement: `kubectl top` is sampled right after the run and lags by tens of seconds, so the CPU column is not a peak; the LLM numbers rest on 10 questions; the numbers come from one machine and one run.
 
 ### 7.4 Milestones
 

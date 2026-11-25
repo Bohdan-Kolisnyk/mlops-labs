@@ -1,0 +1,50 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: mlops
+
+resources:
+  - namespace.yaml
+  - storage.yaml
+  - postgres.yaml
+  - mlflow.yaml
+  - ml-service.yaml
+  - llm-service.yaml
+  - jobs.yaml
+  - monitoring.yaml
+  - drift-cronjob.yaml
+  - responder.yaml
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+configMapGenerator:
+  - name: app-config
+    literals:
+      - MODEL_NAME=truth-social-abnormal-move
+      - MODEL_ALIAS=champion
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_ENABLE_PROXY_MULTIPART_DOWNLOAD=false
+      - DATA_DIR=/data
+      - SEED_DIR=/app/deploy/seed
+      - PUSHGATEWAY_URL=http://pushgateway:9091
+      - ML_SERVICE_URL=http://ml-service:8000
+      - WINDOW_ROWS=300
+      - MIN_WINDOW_ROWS=100
+      - DRIFT_SHARE_THRESHOLD=0.3
+      - DRIFT_ALERT_PVALUE=0.001
+      - RETRAIN_PROMOTE=never
+      - RETRAIN_MIN_LABELED=100
+  - name: postgres-init
+    files:
+      - init.sql=files/init.sql
+  - name: prometheus-config
+    files:
+      - files/prometheus.yml
+      - files/rules.yml
+  - name: grafana-provisioning
+    files:
+      - files/datasources.yaml
+      - files/dashboards.yaml
+  - name: grafana-dashboards
+    files:
+      - files/truth-social.json

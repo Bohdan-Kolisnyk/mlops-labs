@@ -1,0 +1,21 @@
+# Drift job (Evidently). Own image because Evidently needs pandas 2.
+#   minikube image build -t mlops-labs-monitor:$(git rev-parse --short HEAD) \
+#     -f deploy/docker/Dockerfile.monitor .
+FROM python:3.12-slim
+
+ARG GIT_COMMIT=unknown
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app/src \
+    GIT_COMMIT=${GIT_COMMIT}
+LABEL org.opencontainers.image.revision=${GIT_COMMIT}
+
+COPY deploy/requirements/monitor.txt /tmp/requirements.txt
+RUN pip install -r /tmp/requirements.txt
+
+WORKDIR /app
+COPY src/mlops_labs/__init__.py /app/src/mlops_labs/__init__.py
+COPY src/mlops_labs/serve/ /app/src/mlops_labs/serve/
+
+CMD ["python", "-m", "mlops_labs.serve.monitor"]

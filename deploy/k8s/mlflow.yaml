@@ -1,0 +1,70 @@
+# The tracking server and model registry, in the cluster. Reached by the services as
+# http://mlflow:5000 (cluster DNS). Three settings from the lab notes: --workers 1 (the default
+# starts several workers and needs about 2 GB), --allowed-hosts (MLflow 3 refuses other Host
+# headers than localhost), and the image patched with cryptography==46.0.5.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow
+  labels: {app: mlflow}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: mlflow}
+  template:
+    metadata:
+      labels: {app: mlflow}
+    spec:
+      initContainers:
+        - name: wait-for-postgres
+          image: pgvector/pgvector:pg16
+          command: ["sh", "-c", "until pg_isready -h postgres -p 5432; do echo waiting for postgres; sleep 2; done"]
+      containers:
+        - name: mlflow
+          image: mlops-labs-mlflow:3.16.1-k8s
+          imagePullPolicy: IfNotPresent
+          command: ["mlflow", "server"]
+          args:
+            - --host=0.0.0.0
+            - --port=5000
+            - --workers=1
+            - --allowed-hosts=*
+            - --backend-store-uri=postgresql+psycopg2://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@postgres:5432/mlflow
+            - --artifacts-destination=/mlartifacts
+            - --serve-artifacts
+          env:
+            - name: POSTGRES_USER
+              valueFrom: {secretKeyRef: {name: app-secrets, key: POSTGRES_USER}}
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: app-secrets, key: POSTGRES_PASSWORD}}
+            - {name: MLFLOW_SERVER_ENABLE_JOB_EXECUTION, value: "false"}
+          ports:
+            - containerPort: 5000
+          readinessProbe:
+            httpGet: {path: /health, port: 5000}
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet: {path: /health, port: 5000}
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 5
+          resources:
+            requests: {cpu: 100m, memory: 512Mi}
+            limits: {memory: 1536Mi}
+          volumeMounts:
+            - {name: artifacts, mountPath: /mlartifacts}
+      volumes:
+        - name: artifacts
+          persistentVolumeClaim: {claimName: mlflow-artifacts}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow
+spec:
+  selector: {app: mlflow}
+  ports:
+    - port: 5000
+      targetPort: 5000

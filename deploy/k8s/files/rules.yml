@@ -1,0 +1,96 @@
+groups:
+  - name: drift
+    rules:
+      - alert: FeatureDriftSigma
+        expr: drift_feature_pvalue{feature="sigma"} < on() drift_pvalue_alert_threshold
+        labels: {severity: critical}
+        annotations:
+          summary: >-
+            sigma (volatility of the time slot) drifted: Kolmogorov-Smirnov p-value {{ $value | printf "%.3g" }}
+            is below the alert threshold. The label is defined relative to sigma, so the alert rate and
+            the precision of the model are no longer what was validated. Check the dashboard, then decide
+            on retraining (a retrain Job starts by itself and registers a candidate).
+      - alert: DriftShareHigh
+        expr: drift_share_of_drifted_columns >= on() drift_share_threshold
+        labels: {severity: warning}
+        annotations:
+          summary: >-
+            {{ $value | printf "%.2f" }} of the input columns drifted (alert threshold from the drift job
+            configuration). Several features moved together: look for a change in the data source or in
+            the posting behaviour, not for one broken feature.
+      - alert: PredictionDrift
+        expr: drift_prediction_pvalue < on() drift_pvalue_alert_threshold
+        labels: {severity: warning}
+        annotations:
+          summary: >-
+            The predicted probability drifted (KS p-value {{ $value | printf "%.3g" }}): the model answers
+            differently than on the reference window, whatever the inputs say.
+  - name: data-freshness
+    rules:
+      - alert: RequestLogStale
+        expr: time() - drift_newest_request_timestamp_seconds > 6 * 3600
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: >-
+            No request was logged for {{ $value | humanizeDuration }}. The current window is stale or
+            empty, so a green drift job proves nothing: check that the clients call the service and that
+            the service writes the request log.
+      - alert: DriftMonitorNotRunning
+        expr: time() - drift_run_timestamp_seconds > 900 or absent(drift_run_timestamp_seconds)
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: >-
+            The drift job has not reported for more than 15 minutes (it runs every 5): check the CronJob
+            and the Pushgateway.
+      - alert: DriftMonitorFailed
+        expr: drift_run_success == 0
+        labels: {severity: warning}
+        annotations:
+          summary: "The last drift job run failed: kubectl logs of the newest drift-monitor Job."
+  - name: services
+    rules:
+      - alert: MLServiceDown
+        expr: up{job="ml-service"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Prometheus cannot scrape the ML service."
+      - alert: MLModelNotLoaded
+        expr: ml_model_loaded == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "The ML service is up but has no model (registry unreachable or alias missing)."
+      - alert: MLRequestLogWriteFailing
+        expr: increase(ml_request_log_errors_total[10m]) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "The ML service serves rows it cannot log, so the current window of the drift job is incomplete."
+      - alert: MLHighErrorRate
+        expr: >-
+          sum(rate(ml_requests_total{endpoint="/predict",status=~"5.."}[5m]))
+          / clamp_min(sum(rate(ml_requests_total{endpoint="/predict"}[5m])), 1e-9) > 0.05
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "More than 5% of /predict requests fail with a 5xx status."
+      - alert: MLHighLatency
+        expr: >-
+          histogram_quantile(0.95, sum by (le) (rate(ml_request_latency_seconds_bucket{endpoint="/predict"}[5m]))) > 1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "p95 latency of /predict is above 1 second."
+      - alert: LLMServiceDown
+        expr: up{job="llm-service"} == 0
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "Prometheus cannot scrape the LLM service."
+      - alert: LLMUpstreamErrors
+        expr: increase(llm_upstream_errors_total[10m]) > 3
+        labels: {severity: warning}
+        annotations:
+          summary: "The answering model API failed more than 3 times in 10 minutes."

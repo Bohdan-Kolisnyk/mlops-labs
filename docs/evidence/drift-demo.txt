@@ -1,0 +1,137 @@
+== 1. baseline window: unchanged rows ==
+$ badgers python scripts/replay.py --url http://127.0.0.1:53951 --mode baseline --labels
+  sent 300 rows (baseline) in 0.3s to model version 1; alerts 71 (23.7%); image 76644f4-dirty
+  sent 300 labels
+  Downloading networkx (2.0MiB)
+  Downloading scipy (34.9MiB)
+  Downloading numpy (11.8MiB)
+   Downloaded networkx
+   Downloaded numpy
+   Downloaded scipy
+  Installed 18 packages in 6.26s
+$ kubectl logs job/drift-demo-baseline-010122
+window: 300 rows (minimum 100), reference: 1000 rows of model version 1, log: 312 rows, newest request: 2026-11-25 23:01:22.032540082+00:00
+feature                   p-value  drift
+posts_prev_60min           0.1487  -
+weekday                    0.1676  -
+text_len                   0.2359  -
+last_bar_return            0.2459  -
+has_media                   0.282  -
+minutes_since_open         0.4562  -
+caps_share                 0.6961  -
+sigma                      0.9101  -
+slot_index                 0.9165  -
+link_count                      1  -
+share of drifted columns 0.000 (alert threshold 0.3), prediction p-value 0.3767, alert rate 0.237 (reference 0.186), labeled rows 300
+== 2. current window with the injected shift ==
+$ shift --labels --shift-columns sigma --shift-std 3.0 --fraction 0.4
+  injected shift: {
+    "generator": "badgers FixedShiftGenerator + CountSelector",
+    "columns": [
+      "sigma"
+    ],
+    "shift_in_batch_std": 3.0,
+    "fraction_of_rows": 0.4,
+    "rows_affected": 120,
+    "rows_total": 300,
+    "mean_before": {
+      "sigma": 0.003981
+    },
+    "mean_after": {
+      "sigma": 0.006838
+    }
+  }
+  sent 300 rows (shift) in 0.2s to model version 1; alerts 27 (9.0%); image 76644f4-dirty
+  sent 300 labels
+$ kubectl logs job/drift-demo-shift-010154
+window: 300 rows (minimum 100), reference: 1000 rows of model version 1, log: 612 rows, newest request: 2026-11-25 23:01:54.128015041+00:00
+feature                   p-value  drift
+sigma                   2.326e-33  DRIFT
+has_media                  0.1081  -
+text_len                   0.2169  -
+slot_index                 0.2308  -
+caps_share                 0.2948  -
+weekday                    0.3421  -
+last_bar_return            0.4562  -
+posts_prev_60min           0.8101  -
+minutes_since_open         0.8252  -
+link_count                 0.9901  -
+share of drifted columns 0.100 (alert threshold 0.3), prediction p-value 9.269e-24, alert rate 0.090 (reference 0.186), labeled rows 300
+== 3. the alert ==
+alert FeatureDriftSigma (critical), starts 2026-11-25T23:02:27.464Z: sigma (volatility of the time slot) drifted: Kolmogorov-Smirnov p-value 2.33e-33 is below the alert threshold. The label is defined relative to sigma, so the al
+alert PredictionDrift (warning), starts 2026-11-25T23:02:27.464Z: The predicted probability drifted (KS p-value 9.27e-24): the model answers differently than on the reference window, whatever the inputs say.
+== 4. the responder started a retraining Job (stretch) ==
+$ kubectl get jobs -l app=retrain
+NAME                      STATUS     COMPLETIONS   DURATION   AGE   CONTAINERS   IMAGES                        SELECTOR
+retrain-20261125-230241   Complete   1/1           13s        14s   retrain      mlops-labs-ml:76644f4-dirty   batch.kubernetes.io/controller-uid=8238fea4-c188-4e24-a618-d743e6ca29e9
+$ kubectl logs deploy/responder --tail=8
+alert DriftMonitorNotRunning resolved: The drift job has not reported for more than 15 minutes (it runs every 5): check the CronJob and the Pushgateway.
+alert DriftMonitorFailed resolved: The last drift job run failed: kubectl logs of the newest drift-monitor Job.
+alert RequestLogStale firing: No request was logged for 20782d 22h 25m 27s. The current window is stale or empty, so a green drift job proves nothing: check that the clients call the service and that the service writes the request log.
+alert MLServiceDown resolved: Prometheus cannot scrape the ML service.
+alert RequestLogStale resolved: No request was logged for 20782d 22h 40m 12s. The current window is stale or empty, so a green drift job proves nothing: check that the clients call the service and that the service writes the request log.
+alert PredictionDrift firing: The predicted probability drifted (KS p-value 9.27e-24): the model answers differently than on the reference window, whatever the inputs say.
+alert FeatureDriftSigma firing: sigma (volatility of the time slot) drifted: Kolmogorov-Smirnov p-value 2.33e-33 is below the alert threshold. The label is defined relative to sigma, so the alert rate and the precision of the model are no longer what was validated. Check the dashboard, then decide on retraining (a retrain Job starts by itself and registers a candidate).
+started Job retrain-20261125-230241 because of alert FeatureDriftSigma
+annotation: {'triggered-by': 'alertmanager:FeatureDriftSigma'}
+$ kubectl logs job/retrain-20261125-230241
+trigger alert:FeatureDriftSigma: 600 labeled rows in the request log
+2026/11/25 23:02:48 WARNING mlflow.utils.git_utils: Failed to import Git (the Git executable is probably not on your PATH), so Git SHA is not available. Error: Failed to initialize: Bad git executable.
+The git executable must be specified in one of the following ways:
+    - be included in your $PATH
+    - be set via $GIT_PYTHON_GIT_EXECUTABLE
+    - explicitly set via git.refresh(<full-path-to-git-executable>)
+
+All git commands will error until this is rectified.
+
+This initial message can be silenced or aggravated in the future by setting the
+$GIT_PYTHON_REFRESH environment variable. Use one of the following values:
+    - quiet|q|silence|s|silent|none|n|0: for no message or exception
+    - warn|w|warning|log|l|1: for a warning message (logging level CRITICAL, displayed by default)
+    - error|e|exception|raise|r|2: for a raised exception
+
+Example:
+    export GIT_PYTHON_REFRESH=quiet
+
+2026/11/25 23:02:48 WARNING mlflow.utils.git_utils: Failed to import Git (the Git executable is probably not on your PATH), so Git branch is not available. Error: Failed to initialize: Bad git executable.
+The git executable must be specified in one of the following ways:
+    - be included in your $PATH
+    - be set via $GIT_PYTHON_GIT_EXECUTABLE
+    - explicitly set via git.refresh(<full-path-to-git-executable>)
+
+All git commands will error until this is rectified.
+
+This initial message can be silenced or aggravated in the future by setting the
+$GIT_PYTHON_REFRESH environment variable. Use one of the following values:
+    - quiet|q|silence|s|silent|none|n|0: for no message or exception
+    - warn|w|warning|log|l|1: for a warning message (logging level CRITICAL, displayed by default)
+    - error|e|exception|raise|r|2: for a raised exception
+
+Example:
+    export GIT_PYTHON_REFRESH=quiet
+
+2026/11/25 23:02:48 WARNING mlflow.utils.git_utils: Failed to import Git (the Git executable is probably not on your PATH), so Git repository URL is not available. Error: Failed to initialize: Bad git executable.
+The git executable must be specified in one of the following ways:
+    - be included in your $PATH
+    - be set via $GIT_PYTHON_GIT_EXECUTABLE
+    - explicitly set via git.refresh(<full-path-to-git-executable>)
+
+All git commands will error until this is rectified.
+
+This initial message can be silenced or aggravated in the future by setting the
+$GIT_PYTHON_REFRESH environment variable. Use one of the following values:
+    - quiet|q|silence|s|silent|none|n|0: for no message or exception
+    - warn|w|warning|log|l|1: for a warning message (logging level CRITICAL, displayed by default)
+    - error|e|exception|raise|r|2: for a raised exception
+
+Example:
+    export GIT_PYTHON_REFRESH=quiet
+
+Registered model 'truth-social-abnormal-move' already exists. Creating a new version of this model...
+2026/11/25 23:02:49 INFO mlflow.store.model_registry.abstract_store: Waiting up to 300 seconds for model version to finish creation. Model name: truth-social-abnormal-move, version 3
+Created version '3' of model 'truth-social-abnormal-move'.
+🏃 View run candidate-tfidf-lr-seed-C1.0 at: http://mlflow:5000/#/experiments/1/runs/bf1ba975b5bc4aef8c9bc5585b0779ef
+🧪 View experiment at: http://mlflow:5000/#/experiments/1
+registered truth-social-abnormal-move version 3, alias 'candidate', val PR-AUC 0.1540, threshold 0.2025
+Retrain finished (alert:FeatureDriftSigma). Candidate version 3 vs champion 1: PR-AUC on validation 0.154 vs 0.172, on the labeled window holdout 0.556 vs 0.535. Not promoted (RETRAIN_PROMOTE=never): a person decides. Promote with: python deploy/promote.py --version 3
+{"numbers": {"candidate_val": 0.1540019732254627, "champion_val": 0.17244895979002006, "candidate_holdout": 0.5555363630567068, "champion_holdout": 0.5348991248587925}, "promoted": false, "version": "3"}

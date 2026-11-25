@@ -1,0 +1,38 @@
+
+$ python deploy/promote.py --version 2
+== before ==
+registry: champion -> version 1
+before: GET /health -> 200 {'status': 'ready', 'model_version': '1'}
+before: POST /predict -> 200, model_version=1, alias=champion, image_tag=76644f4-dirty, probability=0.2757
+before: deployment image = mlops-labs-ml:76644f4-dirty
+== promote version 2 ==
+alias previous -> 1
+alias champion -> 2
+== restart the Deployment (no image rebuild) ==
+Waiting for deployment "ml-service" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "ml-service" rollout to finish: 1 old replicas are pending termination...
+deployment "ml-service" successfully rolled out
+after: GET /health -> 200 {'status': 'ready', 'model_version': '2'}
+after: POST /predict -> 200, model_version=2, alias=champion, image_tag=76644f4-dirty, probability=0.2172
+after: deployment image = mlops-labs-ml:76644f4-dirty
+reference window rewritten for the new champion (the drift job compares like with like)
+image tag unchanged: mlops-labs-ml:76644f4-dirty
+
+$ python deploy/promote.py --rollback
+== before ==
+registry: champion -> version 2
+before: GET /health -> 200 {'status': 'ready', 'model_version': '2'}
+before: POST /predict -> 200, model_version=2, alias=champion, image_tag=76644f4-dirty, probability=0.2172
+before: deployment image = mlops-labs-ml:76644f4-dirty
+== promote version 1 ==
+alias previous -> 2
+alias champion -> 1
+== restart the Deployment (no image rebuild) ==
+Waiting for deployment "ml-service" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "ml-service" rollout to finish: 1 old replicas are pending termination...
+deployment "ml-service" successfully rolled out
+after: GET /health -> 200 {'status': 'ready', 'model_version': '1'}
+after: POST /predict -> 200, model_version=1, alias=champion, image_tag=76644f4-dirty, probability=0.2757
+after: deployment image = mlops-labs-ml:76644f4-dirty
+reference window rewritten for the new champion (the drift job compares like with like)
+image tag unchanged: mlops-labs-ml:76644f4-dirty

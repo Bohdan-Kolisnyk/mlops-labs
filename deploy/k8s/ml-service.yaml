@@ -1,0 +1,59 @@
+# The ML service. Readiness is the contract: /health answers 200 only when the champion is
+# loaded from the registry and has scored a smoke row, so a pod without a model never gets traffic.
+# Liveness is a separate endpoint: a missing model must not restart the container in a loop.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-service
+  labels: {app: ml-service}
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  selector:
+    matchLabels: {app: ml-service}
+  template:
+    metadata:
+      labels: {app: ml-service}
+    spec:
+      containers:
+        - name: ml-service
+          image: mlops-labs-ml:__TAG__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef: {name: app-config}
+          env:
+            - {name: IMAGE_TAG, value: "__TAG__"}
+          readinessProbe:
+            httpGet: {path: /health, port: 8000}
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /livez, port: 8000}
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 768Mi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: mlops-data}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-service
+  labels: {app: ml-service}
+spec:
+  selector: {app: ml-service}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000

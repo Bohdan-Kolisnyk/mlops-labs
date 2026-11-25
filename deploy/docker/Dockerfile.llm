@@ -1,0 +1,27 @@
+# LLM service and index job. The answering model is an API outside the cluster; the embedding
+# model (all-MiniLM-L6-v2, 90 MB) is baked in, so a pod never depends on the internet to start.
+#   minikube image build -t mlops-labs-llm:$(git rev-parse --short HEAD) \
+#     -f deploy/docker/Dockerfile.llm .
+FROM python:3.12-slim
+
+ARG GIT_COMMIT=unknown
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app/rag \
+    HF_HOME=/opt/hf \
+    GIT_COMMIT=${GIT_COMMIT}
+LABEL org.opencontainers.image.revision=${GIT_COMMIT}
+
+RUN pip install torch==2.15.0 --index-url https://download.pytorch.org/whl/cpu
+COPY deploy/requirements/llm.txt /tmp/requirements.txt
+RUN pip install -r /tmp/requirements.txt
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+ENV HF_HUB_OFFLINE=1
+
+WORKDIR /app
+COPY rag/ /app/rag/
+COPY deploy/seed/corpus.parquet /app/rag/data/corpus.parquet
+
+EXPOSE 8000
+CMD ["uvicorn", "rag_lab.service:app", "--host", "0.0.0.0", "--port", "8000"]

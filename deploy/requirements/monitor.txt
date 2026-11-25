@@ -1,0 +1,8 @@
+# Drift job. Evidently 0.7 does not import with pandas 3, so this image has its own pandas 2
+evidently==0.7.14
+pandas==2.3.3
+numpy<2.6
+scikit-learn==1.9.1
+scipy==1.18.1
+pyarrow==26.0.1
+prometheus-client==0.26.0

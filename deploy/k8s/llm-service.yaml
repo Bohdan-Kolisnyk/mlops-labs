@@ -1,0 +1,65 @@
+# The LLM service: retrieval over the pgvector index and an answer from an API outside the cluster.
+# Its configuration is rag/config.yaml itself (ConfigMap rag-config, created from the file by
+# deploy/up.py) and the prompt files (ConfigMap rag-prompts): the same file as Lab 3.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-service
+  labels: {app: llm-service}
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  selector:
+    matchLabels: {app: llm-service}
+  template:
+    metadata:
+      labels: {app: llm-service}
+    spec:
+      containers:
+        - name: llm-service
+          image: mlops-labs-llm:__TAG__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - {name: IMAGE_TAG, value: "__TAG__"}
+            - name: WAREHOUSE_URL
+              valueFrom: {secretKeyRef: {name: app-secrets, key: WAREHOUSE_URL}}
+            - name: ANTHROPIC_API_KEY
+              valueFrom: {secretKeyRef: {name: app-secrets, key: ANTHROPIC_API_KEY, optional: true}}
+          readinessProbe:
+            httpGet: {path: /health, port: 8000}
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /livez, port: 8000}
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 4
+          resources:
+            requests: {cpu: 200m, memory: 600Mi}
+            limits: {memory: 1536Mi}
+          volumeMounts:
+            - {name: config, mountPath: /app/rag/config.yaml, subPath: config.yaml}
+            - {name: prompts, mountPath: /app/rag/prompts}
+      volumes:
+        - name: config
+          configMap: {name: rag-config}
+        - name: prompts
+          configMap: {name: rag-prompts}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-service
+  labels: {app: llm-service}
+spec:
+  selector: {app: llm-service}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000

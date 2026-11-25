@@ -1,0 +1,6 @@
+# The official MLflow image plus the PostgreSQL driver and the cryptography pin of Lab 2
+# (without it the pod exits with code 132 on some CPUs).
+#   minikube image build -t mlops-labs-mlflow:3.16.1-k8s -f deploy/docker/Dockerfile.mlflow .
+FROM ghcr.io/mlflow/mlflow:v3.16.1
+
+RUN pip install --no-cache-dir psycopg2-binary "cryptography==46.0.5"

@@ -1,0 +1,15 @@
+.git
+.github
+**/.venv
+**/__pycache__
+.pytest_cache
+.ruff_cache
+.env
+.env.*
+data
+logs
+rag/data
+feature_repo
+dags
+docs
+*.pdf

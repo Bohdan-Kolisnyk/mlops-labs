@@ -23,6 +23,11 @@ Full design: [docs/design.md](docs/design.md).
 | Prompts versioned | prompt files in [`rag/prompts/`](rag/prompts); `prompt_hash`, `answer_prompt_hash`, `judge_prompt_hash`, `groundedness_prompt_hash`, `answer_relevance_prompt_hash` and `context_completeness_prompt_hash` are parameters of every LLM run in MLflow | Lab 3 |
 | Cost and latency recorded | tokens in and out, cost in USD, p50 and p95 latency per run (51 calls per sweep row, 150 for the zero-shot run); local versus API argued in design 6.3, 6.7 and 7.1 | Lab 3 |
 | Retrieval index rebuilt by one command | `python -m rag_lab.ingest` rebuilds corpus → chunks → embeddings → pgvector and prints the document count (3,443); one config `rag/config.yaml` | Lab 3 |
+| Services containerized | two service images built from the repository and tagged with the commit: [`Dockerfile.ml`](deploy/docker/Dockerfile.ml) and [`Dockerfile.llm`](deploy/docker/Dockerfile.llm) (plus the monitor and MLflow images); the tag is the short commit, with `-dirty` when sources changed; `kubectl get pods,svc` in [Lab 4](#lab-4-serving-on-minikube-monitoring-and-drift) | Lab 4 |
+| Services deployed with health contracts | [`deploy/k8s/`](deploy/k8s); `/health` is 503 until the champion is loaded, `/livez` is separate; `python deploy/missing_model.py` shows the pod at 0/1 with the alias missing and no restart loop ([`missing-model.txt`](docs/evidence/missing-model.txt)) | Lab 4 |
+| Monitoring scheduled | CronJob `drift-monitor` every 5 minutes (Evidently), Pushgateway, Prometheus, Grafana dashboard [`truth-social.json`](deploy/k8s/files/truth-social.json); screenshot with two windows in Lab 4 | Lab 4 |
+| Drift signal reaches a human | `python deploy/demo.py`: a Badgers shift of σ crosses `FeatureDriftSigma` and the Telegram message is received ([`drift-demo.txt`](docs/evidence/drift-demo.txt), screenshot in Lab 4) | Lab 4 |
+| One command brings the system up | `python deploy/up.py` from a clean clone, with a smoke request at the end; the time is stated in Lab 4 | Lab 4 |
 
 ## Setup
 
@@ -221,6 +226,168 @@ Zero-shot label with the local model (150 test posts, 18 positives, no parse fai
 
 Zero-shot LLM, B0 and candidate on the same 150 test posts: PR-AUC 0.150 / 0.120 / 0.169 (zero-shot with the local Qwen3-4B: 0.120). Cost and latency per run (tokens, USD, p50/p95 over all calls) are in MLflow and in design 6.3 and 6.7.
 
+## Lab 4: serving on Minikube, monitoring and drift
+
+The two services of the project run on Minikube in the namespace `mlops`: the **ML service** scores posts with the champion of the registry, the **LLM service** answers questions over the retrieval index of Lab 3. MLflow, PostgreSQL, Prometheus, Pushgateway, Alertmanager and Grafana run in the same cluster; only the answering model (Claude Haiku) is outside, behind the API key. Diagrams: [`docs/diagrams/cluster.svg`](docs/diagrams/cluster.svg) (topology) and [`docs/diagrams/drift-loop.svg`](docs/diagrams/drift-loop.svg) (the drift-to-action loop); design 6.1, 6.2 and 6.6 describe them.
+
+![Cluster topology](docs/diagrams/cluster.svg)
+
+### Run it
+
+Needs Docker Desktop, `minikube` and `kubectl` on the PATH, and Python 3.12. `deploy/` uses only the standard library, so no environment is needed for the cluster commands.
+
+```powershell
+copy .env.example .env      # ANTHROPIC_API_KEY for /ask; TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID for the alert
+python deploy/up.py         # from a clean clone: cluster, images, jobs, services, smoke request
+python deploy/ports.py      # Grafana 3000, Prometheus 9090, Alertmanager 9093, MLflow 5000, ML 8000, LLM 8001
+```
+
+`up.py` starts Minikube (4096 MB, 2 CPUs by default; `--memory` and `--cpus` change it), builds the images inside Minikube and tags them with the commit, creates the Secrets and ConfigMaps, applies `deploy/k8s/`, waits for the bootstrap jobs (the first champion is trained from the committed seed in `deploy/seed/`, registered as `champion`, and its reference window is written; the retrieval index is built into pgvector), waits for every rollout, sends one `/predict` (and one `/ask` when a key exists) and prints the pods, the services and the elapsed time. Running it again changes nothing that is already right. `python deploy/up.py --down` deletes the cluster. The cluster passwords are generated on the first run into `deploy/.cluster.env`, which git ignores; the key and the Telegram values are read from `.env` and stored only as Kubernetes Secrets.
+
+Telegram: create a bot with @BotFather, send it any message, open `https://api.telegram.org/bot<token>/getUpdates` and copy `chat.id`; put both values into `.env`. Without them the alerts still fire in Alertmanager and the responder still works, but nothing reaches a phone.
+
+Measured on the author's machine: Windows 11, Docker Desktop with 16 GB, Minikube v1.39.0 (docker driver, Kubernetes v1.30.0, 4096 MB and 2 CPUs), `kubectl` client v1.36.1.
+
+| Bring-up | Time |
+|---|---|
+| First run from a clean clone (builds the ML, LLM, monitor and MLflow images over a slow network; the monitor image alone took about 17 minutes of `pip install`) | about 27 minutes |
+| Repeat run with the images already in Minikube, as printed by `up.py` | 0.4 to 1.0 minutes |
+
+`kubectl get pods,svc -n mlops` after the repeat run. The three `drift-monitor` pods with `Error` are the CronJob runs from the time when the MLflow pod was still being killed for memory; every run after the fix is `Completed`.
+
+```text
+NAME                                          READY   STATUS      RESTARTS   AGE
+pod/alertmanager-66b998d5c-qtwhq              1/1     Running     0          23m
+pod/drift-monitor-29927405-fz4n5              0/1     Error       0          71m
+pod/drift-monitor-29927410-vsgwx              0/1     Error       0          66m
+pod/drift-monitor-29927415-pqgpt              0/1     Error       0          61m
+pod/drift-monitor-29927465-d5sbr              0/1     Completed   0          11m
+pod/drift-monitor-29927470-99vqv              0/1     Completed   0          6m37s
+pod/drift-monitor-29927475-wd6rq              0/1     Completed   0          97s
+pod/grafana-746c6f4447-svkzh                  1/1     Running     0          123m
+pod/llm-service-6b7d487fc6-w2dtv              1/1     Running     0          123m
+pod/ml-service-5cbd99cccf-sx4qb               1/1     Running     0          16m
+pod/mlflow-84f444d98c-s8njl                   1/1     Running     0          40m
+pod/model-bootstrap-ltbs2                     0/1     Completed   0          17s
+pod/model-train-20261126-005605-sqwqp         0/1     Completed   0          20m
+pod/postgres-5f8c7f7cf7-m27tv                 1/1     Running     0          64m
+pod/prometheus-845cf6c8c-rl75j                1/1     Running     0          123m
+pod/pushgateway-84769bddbb-lxgqp              1/1     Running     0          123m
+pod/rag-ingest-s55dw                          0/1     Completed   0          17s
+pod/reference-refresh-20261126-005638-rchxf   0/1     Completed   0          19m
+pod/reference-refresh-20261126-005721-x9mvc   0/1     Completed   0          19m
+pod/reference-refresh-20261126-005930-fkcb7   0/1     Completed   0          17m
+pod/reference-refresh-20261126-010007-pprf2   0/1     Completed   0          16m
+pod/responder-6f695d66f8-xh6v5                1/1     Running     0          123m
+pod/retrain-20261125-230241-fdfmx             0/1     Completed   0          13m
+
+NAME                   TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)    AGE
+service/alertmanager   ClusterIP   10.96.77.87      <none>        9093/TCP   123m
+service/grafana        ClusterIP   10.110.187.109   <none>        3000/TCP   123m
+service/llm-service    ClusterIP   10.108.41.226    <none>        8000/TCP   123m
+service/ml-service     ClusterIP   10.109.194.103   <none>        8000/TCP   123m
+service/mlflow         ClusterIP   10.99.173.29     <none>        5000/TCP   123m
+service/postgres       ClusterIP   10.99.128.134    <none>        5432/TCP   123m
+service/prometheus     ClusterIP   10.100.38.45     <none>        9090/TCP   123m
+service/pushgateway    ClusterIP   10.97.228.161    <none>        9091/TCP   123m
+service/responder      ClusterIP   10.98.65.89      <none>        8080/TCP   123m
+```
+
+### What each service promises
+
+| | ML service | LLM service |
+|---|---|---|
+| Ready (`/health`, readiness probe) | 200 only when the champion is loaded by `models:/truth-social-abnormal-move@champion` and has answered a smoke prediction; otherwise 503 with the reason | 200 only when the API key is set, the index hash matches `rag/config.yaml` and one probe retrieval returns a passage (no paid call); otherwise 503 |
+| Alive (`/livez`, liveness probe) | the process answers | the process answers |
+| Config | `app-config` ConfigMap (model name, alias, MLflow URL, paths, thresholds) | `rag/config.yaml` and `rag/prompts/` mounted as ConfigMaps, so the service reads the Lab 3 configuration file itself |
+| Secrets | `app-secrets` | `app-secrets` (API key) |
+| Metrics | `/metrics`: requests, latency, predicted and alerted rows, probability histogram, model info (version, alias, commit), log errors | `/metrics`: requests, latency, retrieval and generation seconds, tokens, cost in USD, upstream errors |
+
+Request log: every row the ML service scores is appended to `/data/requests/requests.jsonl` on a PVC (features, probability, alert, model version, timestamp); labels sent to `POST /feedback` go to `labels.jsonl` and join the rows by `request_id`.
+
+**A missing model keeps the pod out of traffic.** `python deploy/missing_model.py` scales the service to 0, points the alias at one that does not exist, scales it to 1 and shows the pod at `0/1` with no endpoints, `/health` 503 with the reason, `/livez` 200 and zero restarts, then restores the alias and shows the pod ready. The output is saved to [`docs/evidence/missing-model.txt`](docs/evidence/missing-model.txt).
+
+**Promotion without a rebuild.** The service loads `models:/name@alias`, so changing which version serves is a registry operation:
+
+```powershell
+python deploy/promote.py --new-version     # trains version 2 (C=0.3) in a Job, registers it, aliases it as candidate
+python deploy/promote.py --version 2       # moves champion to 2 (keeps the old one as previous), restarts the Deployment
+python deploy/promote.py --rollback        # champion back to previous
+```
+
+Each command queries `/predict` afterwards and prints the `model_version` and the `image_tag` of the answer: the version changes and the image tag does not. Saved to [`docs/evidence/alias-promotion.txt`](docs/evidence/alias-promotion.txt).
+
+### Monitoring
+
+The CronJob `drift-monitor` runs every 5 minutes (hourly would be the production choice, see design 6.6). It takes the last 300 logged requests scored by the reference model version (at least 100 are required) as the current window and the 1,000 training rows that the bootstrap Job scored with the champion as the reference window, runs the Evidently `DataDriftPreset` on the 10 input columns and a drift test on the predicted probability, writes the HTML and JSON report to the PVC and pushes the numbers to the Pushgateway. When labels have arrived (at least 30 labelled rows) it also pushes PR-AUC, precision and coverage at the alert threshold next to the reference values. Prometheus scrapes the Pushgateway and the `/metrics` of both services and evaluates 13 rules (drift, freshness, service); Alertmanager sends the alerts to Telegram and to the responder.
+
+The Grafana dashboard (provisioned from [`deploy/k8s/files/truth-social.json`](deploy/k8s/files/truth-social.json), 29 panels) has rows for the request log and service health, the drift state per feature, the prediction distribution, freshness, quality and the LLM service.
+
+The dashboard during the replay (last 30 minutes). The input-drift row shows both states on one time axis: the first monitoring run (about 01:02) is the baseline with a p-value of `sigma` near 1, the following runs are after the injected shift, where the p-value of `sigma` drops far below the alert threshold of 0.001 (the yellow line). The share of drifted columns stays at 0.10, under the breadth threshold of 0.3, because only `sigma` moved. The log-scale panels clamp the p-value at 1e-12 (`clamp_min` in the query); without a lower bound Grafana 11.5 drew nothing on them. The measured p-value of `sigma` is 2.3e-33 (Prometheus, `min_over_time(drift_feature_pvalue[2h])`), so the axis shows the floor and the tick labels round to 0.
+
+![Grafana, input drift and alert state](docs/screenshots/grafana_drift.png)
+
+Prediction drift, mean predicted probability and alert rate (current window against the reference window), then the service metrics of both services: requests per second, latency of `/predict`, the rows scored and the LLM service cost.
+
+![Grafana, prediction drift and service metrics](docs/screenshots/grafana_service.png)
+
+Freshness and quality: age of the newest logged request, rows in the window and in the request log, PR-AUC on the labelled rows of the window against the validation reference, precision and coverage at the alert threshold, and the retrain Job (candidate and champion PR-AUC on the labelled holdout).
+
+![Grafana, freshness and quality](docs/screenshots/grafana_quality.png)
+
+### Injected drift
+
+```powershell
+python deploy/demo.py     # all of it, in order; saves docs/evidence/drift-demo.txt
+```
+
+or step by step (the ML service must be port-forwarded by `deploy/ports.py`):
+
+```powershell
+uv run --with requests --with badgers python scripts/replay.py --mode baseline --labels
+uv run --with requests --with badgers python scripts/replay.py --mode shift --labels
+```
+
+**The shift, as documented.** `scripts/replay.py` takes 300 held-out rows of the training period (those that were not used to fit the champion; the seed table has a `split` column) and sends them in batches of 50 to `/predict`. In `shift` mode the rows are first changed with Badgers: `FixedShiftGenerator` adds 3 standard deviations of the batch to `sigma` in 40% of the rows (`CountSelector` picks them), and the script prints the columns, the number of rows changed and the mean before and after. Every request is logged by the service. Options: `--shift-columns`, `--shift-std`, `--fraction`, `--rows`, `--source test` (replay the held-out 2026 rows, which drift on their own, see below).
+
+**Threshold, and who receives the alert.** The alert fires when the Kolmogorov-Smirnov p-value of `sigma` in the window against the reference is below 0.001 (`FeatureDriftSigma`, critical), or when 30% or more of the 10 input columns drift at p below 0.05 (`DriftShareHigh`). The consumer is the system owner, who decides on a retrain. σ is the feature that defines the label, so a shift in it changes the meaning of the alert threshold, not just a score; the strict 0.001 is chosen because, with 300 rows against 1,000, p below 0.05 is crossed by ordinary noise and by the slow growth of the posts (mean length 142 characters in 2023, 459 in the 2026 hold-out). The false-alarm rate accepted is below one window in a thousand for a stable σ; the cost of a miss is a model that keeps alerting on the wrong posts until the monthly review, which the breadth rule backs up. Calibration on the replay: baseline share 0.00; with the shift, p of σ is 2.3e-33, p of the prediction 9.3e-24, the share 0.10 (one of ten columns) and the alert rate falls from 0.24 to 0.09. Design 6.6 gives the full argument.
+
+**Natural drift.** Replaying the held-out 2026 rows without any shift already gives a share of 0.5 to 0.7 of drifted columns (validation 0.8): posts got longer, so the training reference is stale for the newest period. That is why the baseline of the replay is the rest of the training period, and why the plan retrains monthly.
+
+**The alert as received.**
+
+The run of `python deploy/demo.py` on 26 November 2026 (full output in [`docs/evidence/drift-demo.txt`](docs/evidence/drift-demo.txt)):
+
+| Window | Share of drifted columns | p-value of `sigma` | p-value of the prediction | Alert rate (reference 0.186) |
+|---|---|---|---|---|
+| baseline, 300 unchanged rows | 0.000 | 0.91 | 0.377 | 0.237 |
+| shifted, 300 rows, `sigma` +3 std in 40% | 0.100 | 2.3e-33 | 9.3e-24 | 0.090 |
+
+`FeatureDriftSigma` (critical) and `PredictionDrift` (warning) fired, Alertmanager sent them to the owner's Telegram chat (screenshot below, with the test message of the bot before them) and to the responder, which started the retrain Job. The breadth rule `DriftShareHigh` did not fire (0.10 is below 0.3), as designed: one feature moved, and the σ rule is the one that catches it.
+
+![Telegram alert](docs/screenshots/telegram_alert.png)
+
+The third message is the retrain result: candidate version 3 against champion 1, PR-AUC on the seed validation split 0.154 against 0.172, on the labelled window holdout 0.556 against 0.535, not promoted (`RETRAIN_PROMOTE=never`), with the command for the owner to run. Read the holdout numbers as a demonstration of the mechanism, not as a gain: the window holds replayed training rows with a synthetic shift, and the candidate is worse on the validation split.
+
+### Stretch: the alert starts a retrain, the owner decides
+
+The responder (`src/mlops_labs/serve/responder.py`) is the webhook receiver of Alertmanager. On `FeatureDriftSigma` or `DriftShareHigh` it creates one Job from the image of the ML service (RBAC: create, list and get Jobs in the namespace only; at most one Job per hour). The Job (`src/mlops_labs/serve/retrain.py`) trains on the seed training split plus the first 70% of the labelled window, evaluates on the seed validation split and the last 30% of the window, registers the version with the alias `candidate` and posts the result to Telegram. It does not promote (`RETRAIN_PROMOTE=never`); `guarded` promotes only if the candidate's validation PR-AUC is at least the champion's minus 0.02 and its PR-AUC on the newest window is higher, and keeps the old version as `previous` for `--rollback`. `deploy/demo.py` shows the Job started by the alert and its log; saved in [`docs/evidence/drift-demo.txt`](docs/evidence/drift-demo.txt).
+
+### Benchmark and tests
+
+```powershell
+python deploy/benchmark.py     # latency of both services, tokens and cost, kubectl top; docs/evidence/benchmark.md
+uv run --with fastapi --with httpx --with prometheus-client --with alembic pytest tests/test_serve.py tests/test_llm_service.py
+```
+
+Measured on the cluster above (through `kubectl port-forward`, one run, full tables in [`docs/evidence/benchmark.md`](docs/evidence/benchmark.md) and design 7.3): ML service, one post, p50 12.7 ms, p95 34.6 ms (60 req/s); 50 posts per request, p50 14.9 ms (3,099 rows/s); 4 concurrent clients, p50 64.3 ms, p95 121.9 ms, with no gain in throughput (the cause was not isolated: one uvicorn worker or the port-forward tunnel). LLM service: p50 2.43 s, p95 4.20 s over 10 questions, 1,772 tokens in and 396 out, 0.00038 USD per answer. Memory of the pods after the run: 14 to 494 Mi, the largest is the LLM service (embedding model) at 494 Mi, MLflow 365 Mi, ML service 190 Mi.
+
+The benchmark numbers are copied to design 7.3. The 15 tests cover the health contract (not ready without a model, ready after the alias appears, 503 with the reason), version by alias and reload, input validation, metrics, bootstrap idempotence and the reference window, the monitor's quality numbers, the request log, the responder trigger and cooldown, the replay shift fraction, and the LLM service with fakes.
+
+### Data in the repository
+
+`deploy/seed/` holds a derived copy of the data so that a clean clone needs no DVC pull for Lab 4: `train_table.parquet` (the 3,623 posts of the Lab 2 training table with features and a `split` column), `corpus.parquet` (the post texts for the retrieval index) and `DATA_VERSION` (`d756bd56a53aee1182a62f609dab15bc.dir`, written as a tag on every registered version). Source and licence as in [Data](#data): CC-BY-NC-4.0, non-commercial coursework, attribution to the dataset authors. `scripts/export_seed.py` recreates it from the DVC data.
+
 ## Use of AI tools
 
 I used Claude as an assistant for Lab 1:
@@ -238,5 +405,10 @@ For Lab 3:
 1. Plan the LLM and retrieval design and the evaluation
 2. Write the first versions of the `rag/` package (ingestion, pgvector store, retrieval, evaluation, the zero-shot baseline), the prompts, and the Lab 3 text of README and design doc
 3. The evaluation questions were generated by Claude Haiku and then read by me
+
+For Lab 4:
+1. Plan the cluster layout, the drift rule and the alert path
+2. Write the first versions of the `serve/` package (services, bootstrap, monitor, retrain, responder), the LLM service, the Dockerfiles, the manifests, the deploy scripts, the replay script, the dashboard, the tests, and the Lab 4 text of README and design doc
+3. The runs on my cluster, the screenshots, the alert on my phone and the measurements are mine
 
 This part is written by me, by hand. Everything is reviewed, verified and approved by me.

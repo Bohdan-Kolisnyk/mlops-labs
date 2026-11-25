@@ -229,3 +229,7 @@ feature_repo/data/
 
 # Lab 3 derived data (the evaluation set rag/eval/ is committed)
 rag/data/
+
+# Lab 4: generated cluster passwords and local evidence scratch
+deploy/.cluster.env
+deploy/.build/

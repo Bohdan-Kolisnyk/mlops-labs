@@ -1,0 +1,74 @@
+# The stretch goal: Alertmanager calls this webhook; when a drift alert fires it creates one retrain
+# Job through the Kubernetes API. The ServiceAccount may only create and list Jobs in this namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: responder
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: responder
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "list", "get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: responder
+subjects:
+  - kind: ServiceAccount
+    name: responder
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: responder
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: responder
+  labels: {app: responder}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: responder}
+  template:
+    metadata:
+      labels: {app: responder}
+    spec:
+      serviceAccountName: responder
+      containers:
+        - name: responder
+          image: mlops-labs-ml:__TAG__
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "mlops_labs.serve.responder"]
+          ports:
+            - containerPort: 8080
+          env:
+            - {name: TRIGGER_ALERTS, value: "FeatureDriftSigma,DriftShareHigh"}
+            - {name: COOLDOWN_SECONDS, value: "3600"}
+            - {name: RETRAIN_IMAGE, value: "mlops-labs-ml:__TAG__"}
+            - {name: APP_CONFIGMAP, value: app-config}
+          readinessProbe:
+            httpGet: {path: /, port: 8080}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /, port: 8080}
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 20m, memory: 48Mi}
+            limits: {memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: responder
+spec:
+  selector: {app: responder}
+  ports:
+    - port: 8080
+      targetPort: 8080
